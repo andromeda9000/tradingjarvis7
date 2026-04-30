@@ -38,7 +38,7 @@ def get_binance_symbols():
     return set()
 
 @st.cache_data(ttl=300)
-def get_coingecko_coins(pages=3):
+def get_coingecko_coins(pages=2):
     """Recupera fino a 750 coin da CoinGecko ordinati per market cap."""
     coins = []
     for page in range(1, pages + 1):
@@ -71,10 +71,21 @@ def get_coingecko_coins(pages=3):
     return coins
 
 
+@st.cache_data(ttl=300)
 def build_crypto_list():
     """Costruisce la lista completa: CoinGecko + flag Binance disponibile."""
-    binance_syms = get_binance_symbols()
-    cg_coins     = get_coingecko_coins(pages=3)
+    try:
+        binance_syms = get_binance_symbols()
+    except Exception:
+        binance_syms = set()
+    try:
+        cg_coins = get_coingecko_coins(pages=2)
+    except Exception:
+        cg_coins = []
+    if not cg_coins:
+        return [{"display":"🔵 🟢 BTC — Bitcoin $0 (0%)","symbol":"BTC","name":"Bitcoin",
+                 "cg_id":"bitcoin","binance_sym":"BTCUSDT","price":0,"change":0,
+                 "volume":0,"rank":1,"on_binance":True}]
     result = []
     for c in cg_coins:
         if not isinstance(c, dict):
@@ -611,8 +622,8 @@ def main():
             crypto_list = build_crypto_list()
 
         if not crypto_list:
-            st.error("Impossibile caricare la lista. Riprova.")
-            st.stop()
+            st.error("⚠️ Impossibile caricare la lista cripto. Aggiorna la pagina.")
+            return
 
         # Ricerca testuale
         search = st.text_input("🔍 Cerca coin (nome o simbolo)", "")
@@ -665,8 +676,8 @@ def main():
             df_raw, src_used, tf_used = get_ohlcv(coin_info, timeframe, limit)
 
         if df_raw.empty:
-            st.error(f"❌ Nessun dato disponibile per **{coin_info['name']}**.")
-            st.stop()
+            st.error(f"❌ Nessun dato disponibile per **{coin_info['name']}**. Prova un altro timeframe o coin.")
+            return
 
         df = add_indicators(df_raw, ema_periods)
         res = jarvis.signal(df, ema_periods, soglia)
