@@ -186,7 +186,7 @@ def get_coingecko_ohlcv(cg_id: str, days: int):
         except Exception:
             df["volume"] = 0.0
 
-        df.fillna(method="ffill", inplace=True)
+        df.ffill(inplace=True)
         df.dropna(subset=["open","high","low","close"], inplace=True)
         return df
 
