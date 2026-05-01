@@ -399,7 +399,7 @@ def make_chart(df, eps, show, src_label, exchange):
     INC,DEC="#26a69a","#ef5350"
     ex_color = EX_CHART_COLORS.get(exchange, "#ffffff")
 
-    rows=[(1,0.50),(2,0.12)]
+    rows=[(1,0.45),(2,0.10)]
     smap={}
     for key,lbl,flag in [
         ("macd","⚡ MACD","MACD" in show),
@@ -410,11 +410,11 @@ def make_chart(df, eps, show, src_label, exchange):
     ]:
         if flag:
             smap[key]=len(rows)+1
-            rows.append((len(rows)+1,0.11))
+            rows.append((len(rows)+1,0.13))
 
     nr=len(rows); tot=sum(r[1] for r in rows)
     fig=make_subplots(rows=nr,cols=1,shared_xaxes=True,
-        vertical_spacing=0.02,
+        vertical_spacing=0.03,
         row_heights=[r[1]/tot for r in rows],
         subplot_titles=["📈 Prezzo","📊 Volume"]+
             [{"macd":"⚡ MACD","rsi":"📉 RSI","stoch":"🔄 Stoch",
@@ -500,11 +500,11 @@ def make_chart(df, eps, show, src_label, exchange):
             text=f'<span style="color:{ex_color}">●</span>  {src_label}',
             font=dict(size=15,color="#e0e0e0"),x=0.01),
         template="plotly_dark",paper_bgcolor="#0d1117",plot_bgcolor="#161b22",
-        height=max(650,500+nr*60),showlegend=True,
+        height=max(850, 420 + nr * 120),showlegend=True,
         legend=dict(orientation="h",yanchor="bottom",y=1.01,xanchor="right",x=1,
             bgcolor="rgba(13,17,23,0.8)",bordercolor="#30363d",borderwidth=1,
             font=dict(size=10)),
-        hovermode="x unified",margin=dict(l=55,r=15,t=65,b=30))
+        hovermode="x unified",margin=dict(l=60,r=20,t=70,b=40))
     for i in range(1,nr+1):
         fig.update_xaxes(gridcolor="#21262d",zeroline=False,rangeslider_visible=False,row=i,col=1)
         fig.update_yaxes(gridcolor="#21262d",zeroline=False,row=i,col=1)
@@ -627,7 +627,6 @@ def main():
 
         st.divider()
         soglia = st.slider("🎯 Soglia AI", 40, 80, 60)
-
         if st.button("🔄 Aggiorna", type="primary", use_container_width=True):
             st.cache_data.clear(); st.rerun()
 
