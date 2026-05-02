@@ -548,6 +548,151 @@ def get_calendar():
                 (3,"CPI Inflation","🇺🇸","HIGH","3.2%","3.1%"),(5,"FOMC","🇺🇸","HIGH","5.25%","5.25%"),
                 (7,"ECB Rate","🇪🇺","HIGH","4.00%","4.00%"),(14,"Core PCE","🇺🇸","MEDIUM","2.7%","2.6%")]]
 
+
+# ── TOP 25 CRIPTO PER CAP ──────────────────────────────────────────────────
+TOP25 = [
+    "BTC","ETH","BNB","SOL","XRP","DOGE","ADA","AVAX","TRX","SHIB",
+    "DOT","LINK","MATIC","LTC","UNI","ATOM","XLM","APT","ICP","OP",
+    "ARB","FIL","HBAR","VET","INJ"
+]
+
+@st.cache_data(ttl=120, show_spinner=False)
+def scanner_top25(tf_scan="1h"):
+    results = []
+    for sym in TOP25:
+        pair_b = f"{sym}USDT"
+        df_s, _ = get_ohlcv({"exchange":"Binance","symbol":sym,"pair":pair_b}, tf_scan, 150)
+        if df_s.empty or len(df_s) < 50:
+            continue
+        df_s = add_all(df_s, [20, 50])
+        cl = df_s["close"]
+        curr = float(cl.iloc[-1])
+        atr_v = float(df_s["ATR"].iloc[-1]) if "ATR" in df_s.columns else curr * 0.01
+
+        # ── Jarvis score semplificato per scanner ──
+        sc = 0
+        # EMA stack
+        e20 = float(df_s["EMA_20"].iloc[-1]); e50 = float(df_s["EMA_50"].iloc[-1])
+        if curr > e20 > e50: sc += 20
+        elif curr < e20 < e50: sc -= 20
+        # MACD
+        if df_s["MACD"].iloc[-1] > df_s["MACD_sig"].iloc[-1]: sc += 15
+        else: sc -= 15
+        # RSI
+        rv = float(df_s["RSI"].iloc[-1])
+        if rv < 35: sc += 18
+        elif rv > 65: sc -= 18
+        elif rv > 50: sc += 5
+        else: sc -= 5
+        # SuperTrend
+        std = float(df_s["ST_d"].iloc[-1]) if "ST_d" in df_s.columns else 0
+        if std == 1: sc += 20
+        elif std == -1: sc -= 20
+        # ADX forza
+        adx_v = float(df_s["ADX"].iloc[-1]) if "ADX" in df_s.columns else 0
+        if adx_v > 25: sc = int(sc * 1.15)
+        # Volume spike
+        if float(df_s["volume"].iloc[-1]) > float(df_s["VOLMA"].iloc[-1]) * 1.4: sc = int(sc * 1.1)
+
+        # Normalizza in 0-100
+        sc_norm = max(0, min(100, 50 + sc))
+
+        # Segnale solo se deciso
+        if sc_norm >= 65:
+            direction = "LONG"
+        elif sc_norm <= 35:
+            direction = "SHORT"
+        else:
+            continue  # skip NEUTRAL
+
+        sl_dist = atr_v * 1.5
+        if direction == "LONG":
+            sl   = curr - sl_dist
+            tp1  = curr + sl_dist * 2.0
+            tp2  = curr + sl_dist * 3.236
+        else:
+            sl   = curr + sl_dist
+            tp1  = curr - sl_dist * 2.0
+            tp2  = curr - sl_dist * 3.236
+
+        chg = (curr / float(cl.iloc[-2]) - 1) * 100 if float(cl.iloc[-2]) else 0
+
+        results.append({
+            "sym": sym, "direction": direction, "score": sc_norm,
+            "price": curr, "sl": sl, "tp1": tp1, "tp2": tp2,
+            "rsi": rv, "adx": adx_v, "chg": chg,
+        })
+
+    results.sort(key=lambda x: abs(x["score"] - 50), reverse=True)
+    return results
+
+
+def render_scanner(col_widget, tf_scan):
+    with col_widget:
+        st.subheader("🔭 Scanner Top 25")
+        st.caption(f"Segnali Jarvis · TF: {tf_scan} · aggiorna ogni 2 min")
+
+        if st.button("🔍 Scansiona ora", key="scan_btn", use_container_width=True):
+            st.cache_data.clear()
+
+        with st.spinner("📡 Scansione in corso..."):
+            sigs = scanner_top25(tf_scan)
+
+        if not sigs:
+            st.info("Nessun segnale chiaro al momento.")
+            return
+
+        longs  = [s for s in sigs if s["direction"] == "LONG"]
+        shorts = [s for s in sigs if s["direction"] == "SHORT"]
+        st.markdown(f"**🟢 {len(longs)} LONG  ·  🔴 {len(shorts)} SHORT**")
+        st.divider()
+
+        for s in sigs:
+            is_long = s["direction"] == "LONG"
+            clr     = "#00e676" if is_long else "#ef5350"
+            arrow   = "▲" if is_long else "▼"
+            px      = s["price"]
+            fmt     = f"${px:,.6f}" if px < 0.01 else f"${px:,.4f}" if px < 1 else f"${px:,.2f}"
+            sl_fmt  = f"${s['sl']:,.5g}"
+            tp1_fmt = f"${s['tp1']:,.5g}"
+            tp2_fmt = f"${s['tp2']:,.5g}"
+            chg_col = "🟢" if s["chg"] >= 0 else "🔴"
+
+            st.markdown(
+                f"""<div style="background:#161b22;border:1px solid #30363d;
+                border-left:4px solid {clr};border-radius:8px;
+                padding:10px 12px;margin-bottom:10px;font-size:13px;">
+                <div style="display:flex;justify-content:space-between;align-items:center">
+                  <span style="color:{clr};font-weight:700;font-size:16px">{arrow} {s['sym']}/USDT</span>
+                  <span style="color:{clr};background:{'#0d2e1a' if is_long else '#2e0d0d'};
+                        padding:2px 10px;border-radius:12px;font-weight:600">
+                        {'LONG' if is_long else 'SHORT'} · {s['score']}/100</span>
+                </div>
+                <div style="margin-top:6px;color:#8b949e">
+                  {chg_col} {s['chg']:+.2f}% · RSI {s['rsi']:.0f} · ADX {s['adx']:.0f}
+                </div>
+                <div style="margin-top:8px;display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:4px;text-align:center">
+                  <div style="background:#0d1117;border-radius:5px;padding:5px">
+                    <div style="color:#8b949e;font-size:10px">ENTRY</div>
+                    <div style="color:#c9d1d9;font-weight:600">{fmt}</div>
+                  </div>
+                  <div style="background:#0d1117;border-radius:5px;padding:5px">
+                    <div style="color:#ef5350;font-size:10px">STOP LOSS</div>
+                    <div style="color:#ef5350;font-weight:600">{sl_fmt}</div>
+                  </div>
+                  <div style="background:#0d1117;border-radius:5px;padding:5px">
+                    <div style="color:#00e676;font-size:10px">TP1</div>
+                    <div style="color:#00e676;font-weight:600">{tp1_fmt}</div>
+                  </div>
+                  <div style="background:#0d1117;border-radius:5px;padding:5px">
+                    <div style="color:#69f0ae;font-size:10px">TP2</div>
+                    <div style="color:#69f0ae;font-weight:600">{tp2_fmt}</div>
+                  </div>
+                </div>
+                </div>""",
+                unsafe_allow_html=True
+            )
+
 # ── MAIN ───────────────────────────────────────────────────────────────────
 
 def main():
@@ -676,5 +821,8 @@ def main():
             st.caption(f"Prec:`{e['prev']}` · Prev:`{e['forecast']}`")
             st.divider()
         if not evs: st.info("Nessun evento")
+
+    # ── Scanner inserito sotto il calendario ──
+    render_scanner(col_cal, tf)
 
 main()
