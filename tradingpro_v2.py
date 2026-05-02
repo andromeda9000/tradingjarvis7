@@ -367,7 +367,7 @@ def make_chart(df,eps,overlays,osc_sel,signals,rk,direction,exchange,height):
     # ── Volume (barre basse proporzionate al range Y del prezzo) ──
     vol_max=df["volume"].max()
     vol_h_range=(y_hi-y_lo)*0.14
-    vol_y=y_min+(df["volume"]/vol_max.replace(0,1)*vol_h_range) if vol_max>0 else df["volume"]*0
+    vol_y=y_min+(df["volume"]/(vol_max if vol_max>0 else 1)*vol_h_range)
     vc=[INC if c>=o else DEC for c,o in zip(cl,df["open"])]
     fig.add_trace(go.Bar(x=df.index,y=vol_y-y_min,base=y_min,name="Vol",
         marker_color=vc,opacity=0.22,
