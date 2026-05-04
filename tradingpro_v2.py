@@ -5,989 +5,1297 @@ import requests
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
+import re
 from collections import deque
-import time
+import json
+import os
 import warnings
+import time
+import hmac
+import hashlib
 warnings.filterwarnings("ignore")
 
-st.set_page_config(page_title="Jarvis Pro — Crypto", page_icon="🧠", layout="wide")
+st.set_page_config(
+    page_title="Jarvis Pro — Crypto AI",
+    page_icon="🧠",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
-BIN = "https://api.binance.com/api/v3"
-KUC = "https://api.kucoin.com/api/v1"
-OKX = "https://www.okx.com/api/v5"
-HDR = {"User-Agent": "Mozilla/5.0"}
+# ─────────────────────────────────────────────────────────────────────────────
+# COSTANTI
+# ─────────────────────────────────────────────────────────────────────────────
+ADX_TREND_GATE = 20          # segnale emesso solo se ADX > soglia
+ATR_MIN_PCT    = 0.25        # segnale emesso solo se ATR% > soglia
+SIGNAL_LOG     = "jarvis_signal_log.json"
+BITGET_CFG     = "bitget_cfg.json"          # file locale per API keys
 
-TF_BIN = ["1m","3m","5m","15m","30m","1h","2h","4h","6h","8h","12h","1d","3d","1w"]
-TF_KUC = {"1m":"1min","3m":"3min","5m":"5min","15m":"15min","30m":"30min",
-           "1h":"1hour","2h":"2hour","4h":"4hour","6h":"6hour","8h":"8hour",
-           "12h":"12hour","1d":"1day","1w":"1week"}
-TF_OKX = {"1m":"1m","3m":"3m","5m":"5m","15m":"15m","30m":"30m",
-           "1h":"1H","2h":"2H","4h":"4H","6h":"6H","8h":"8H",
-           "12h":"12H","1d":"1D","1w":"1W"}
-TF_HIGHER = {"1m":"15m","3m":"30m","5m":"1h","15m":"4h","30m":"4h",
-             "1h":"4h","2h":"4h","4h":"1d","6h":"1d","8h":"1d",
-             "12h":"1d","1d":"1w","3d":"1w","1w":"1w"}
-EX_ICONS = {"Binance":"🔵","KuCoin":"🟠","OKX":"🟣"}
-EX_CLR   = {"Binance":"#00b4d8","KuCoin":"#f77f00","OKX":"#a855f7"}
+TIMEFRAMES_BIN = ["1m","3m","5m","15m","30m","1h","2h","4h","6h","8h","12h","1d","3d","1w","1M"]
 
-# ── COIN LIST ──────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# ── SEZIONE CONFIGURAZIONE API BITGET ──────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
 
-@st.cache_data(ttl=300,show_spinner=False)
-def get_all_coins():
-    seen={}
-    def _bin():
+def load_bitget_cfg():
+    if os.path.exists(BITGET_CFG):
         try:
-            r=requests.get(f"{BIN}/ticker/24hr",timeout=12)
-            if r.status_code!=200: return []
-            return [{"exchange":"Binance","symbol":x["symbol"][:-4],
-                     "pair":x["symbol"],"price":float(x.get("lastPrice",0) or 0),
-                     "chg":float(x.get("priceChangePercent",0) or 0),
-                     "vol":float(x.get("quoteVolume",0) or 0)}
-                    for x in r.json() if isinstance(x,dict) and x.get("symbol","").endswith("USDT")]
-        except: return []
-    def _kuc():
-        try:
-            r=requests.get(f"{KUC}/market/allTickers",timeout=12)
-            if r.status_code!=200: return []
-            return [{"exchange":"KuCoin","symbol":x["symbol"][:-5],
-                     "pair":x["symbol"],"price":float(x.get("last",0) or 0),
-                     "chg":float(x.get("changeRate",0) or 0)*100,
-                     "vol":float(x.get("volValue",0) or 0)}
-                    for x in r.json().get("data",{}).get("ticker",[])
-                    if isinstance(x,dict) and x.get("symbol","").endswith("-USDT")]
-        except: return []
-    def _okx():
-        try:
-            r=requests.get(f"{OKX}/market/tickers",params={"instType":"SPOT"},timeout=12)
-            if r.status_code!=200: return []
-            out=[]
-            for x in r.json().get("data",[]):
-                if not isinstance(x,dict) or not x.get("instId","").endswith("-USDT"): continue
-                px=float(x.get("last",0) or 0); op=float(x.get("open24h",px) or px)
-                out.append({"exchange":"OKX","symbol":x["instId"][:-5],"pair":x["instId"],
-                            "price":px,"chg":((px/op)-1)*100 if op else 0,
-                            "vol":float(x.get("volCcy24h",0) or 0)})
-            return out
-        except: return []
-    for c in _bin()+_kuc()+_okx():
-        s=c["symbol"]
-        if s not in seen or c["vol"]>seen[s]["vol"]: seen[s]=c
-    result=[]
-    for c in sorted(seen.values(),key=lambda x:-x["vol"]):
-        px=c["price"]
-        fmt=f"${px:,.6f}" if px<0.01 else f"${px:,.4f}" if px<1 else f"${px:,.2f}"
-        arr="🟢" if c["chg"]>=0 else "🔴"
-        c["display"]=f"{EX_ICONS.get(c['exchange'],'⚪')} {arr} {c['symbol']} — {fmt} ({c['chg']:+.2f}%) [{c['exchange']}]"
-        result.append(c)
-    return result
+            return json.load(open(BITGET_CFG))
+        except Exception:
+            pass
+    return {"api_key": "", "api_secret": "", "passphrase": "", "sandbox": True}
 
-# ── OHLCV ──────────────────────────────────────────────────────────────────
+def save_bitget_cfg(cfg: dict):
+    json.dump(cfg, open(BITGET_CFG, "w"), indent=2)
 
-def _tfsec(tf):
-    return {"1m":60,"3m":180,"5m":300,"15m":900,"30m":1800,"1h":3600,
-            "2h":7200,"4h":14400,"6h":21600,"8h":28800,"12h":43200,
-            "1d":86400,"3d":259200,"1w":604800}.get(tf,3600)
+def render_bitget_settings():
+    """Tab dedicato alla configurazione chiavi API Bitget."""
+    st.subheader("🔑 Configurazione API Bitget")
+    st.markdown("""
+    <div style='background:#161b22;border:1px solid #30363d;border-left:4px solid #f0883e;
+         border-radius:8px;padding:12px 16px;margin-bottom:16px'>
+      <b style='color:#f0883e'>⚠️ Sicurezza</b><br>
+      <span style='color:#8b949e;font-size:13px'>
+      Le chiavi vengono salvate <b>localmente</b> nel file <code>bitget_cfg.json</code>.
+      Non condividere mai questo file. Usa chiavi con <b>soli permessi Futures</b>
+      (lettura + ordini) e <b>IP whitelist</b> attiva su Bitget.
+      </span>
+    </div>
+    """, unsafe_allow_html=True)
 
-@st.cache_data(ttl=60,show_spinner=False)
-def _bin_ohlcv(pair,tf,n):
+    cfg = load_bitget_cfg()
+
+    with st.form("bitget_form"):
+        col1, col2 = st.columns(2)
+        with col1:
+            api_key = st.text_input(
+                "API Key", value=cfg.get("api_key",""),
+                placeholder="Incolla qui la tua API Key",
+                help="Trovata nella sezione API Management di Bitget"
+            )
+            passphrase = st.text_input(
+                "Passphrase", value=cfg.get("passphrase",""),
+                type="password",
+                placeholder="Passphrase impostata su Bitget",
+                help="La passphrase che hai scelto al momento della creazione della chiave"
+            )
+        with col2:
+            api_secret = st.text_input(
+                "API Secret", value=cfg.get("api_secret",""),
+                type="password",
+                placeholder="Incolla qui la tua API Secret",
+                help="Secret mostrato una sola volta alla creazione"
+            )
+            sandbox = st.toggle(
+                "🧪 Modalità DEMO (sandbox)",
+                value=cfg.get("sandbox", True),
+                help="Attivo = nessun ordine reale. Disattiva solo se sai cosa fai."
+            )
+
+        st.markdown("---")
+        st.markdown("**🛡️ Permessi consigliati sulla chiave Bitget:**")
+        st.markdown("""
+        - ✅ Futures — Lettura  
+        - ✅ Futures — Ordini  
+        - ❌ Spot — non necessario  
+        - ❌ Prelievi — **mai abilitare**  
+        """)
+
+        saved = st.form_submit_button("💾 Salva configurazione", type="primary")
+        if saved:
+            new_cfg = {
+                "api_key": api_key.strip(),
+                "api_secret": api_secret.strip(),
+                "passphrase": passphrase.strip(),
+                "sandbox": sandbox,
+            }
+            save_bitget_cfg(new_cfg)
+            st.success("✅ Configurazione salvata correttamente!")
+
+    # Test connessione
+    st.divider()
+    st.subheader("🔌 Test connessione")
+    col_test, col_mode = st.columns([2,1])
+    with col_mode:
+        loaded = load_bitget_cfg()
+        mode_label = "🧪 DEMO (sandbox)" if loaded.get("sandbox") else "🔴 LIVE"
+        st.info(f"Modalità attuale: **{mode_label}**")
+    with col_test:
+        if st.button("🔍 Verifica chiavi API", use_container_width=True):
+            cfg_now = load_bitget_cfg()
+            if not cfg_now.get("api_key"):
+                st.error("❌ Nessuna chiave configurata.")
+            else:
+                ok, msg = bitget_test_connection(cfg_now)
+                if ok:
+                    st.success(f"✅ Connessione OK: {msg}")
+                else:
+                    st.error(f"❌ Errore: {msg}")
+
+    # Istruzioni guidate
+    with st.expander("📖 Come creare le chiavi API su Bitget — guida passo passo"):
+        st.markdown("""
+        1. Accedi a [bitget.com](https://www.bitget.com) e vai in **Profilo → API Management**
+        2. Clicca **Create API**
+        3. Dai un nome alla chiave (es. `JarvisPro`)
+        4. Imposta una **Passphrase** (salvala!)
+        5. Seleziona i permessi: solo **Futures → Read + Order**
+        6. Aggiungi il tuo **IP** in whitelist
+        7. Completa la verifica 2FA
+        8. Copia **API Key**, **Secret** e **Passphrase** qui sopra
+        9. Lascia attiva la modalità **DEMO** finché non hai testato bene
+        """)
+
+    # Saldo account (se chiavi presenti)
+    st.divider()
+    st.subheader("💰 Saldo account Bitget")
+    cfg_now = load_bitget_cfg()
+    if cfg_now.get("api_key"):
+        if st.button("📊 Mostra saldo Futures", use_container_width=True):
+            with st.spinner("Richiesta saldo..."):
+                bal = bitget_get_balance(cfg_now)
+            if bal:
+                for asset, info in bal.items():
+                    st.metric(
+                        label=f"💵 {asset}",
+                        value=f"${float(info.get('available','0')):,.2f}",
+                        delta=f"Total: ${float(info.get('equity','0')):,.2f}"
+                    )
+            else:
+                st.warning("Impossibile recuperare il saldo (controlla le chiavi).")
+    else:
+        st.info("Inserisci prima le chiavi API per visualizzare il saldo.")
+
+    # Posizioni aperte
+    st.divider()
+    st.subheader("📋 Posizioni aperte")
+    if cfg_now.get("api_key"):
+        if st.button("🔄 Carica posizioni", use_container_width=True):
+            with st.spinner("Caricamento posizioni..."):
+                positions = bitget_get_positions(cfg_now)
+            if positions:
+                df_pos = pd.DataFrame(positions)
+                st.dataframe(df_pos, use_container_width=True)
+            else:
+                st.info("Nessuna posizione aperta.")
+    else:
+        st.info("Inserisci prima le chiavi API.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ── BITGET API HELPERS ───────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _bitget_sign(secret: str, ts: str, method: str, path: str, body: str = "") -> str:
+    msg = ts + method.upper() + path + body
+    return hmac.new(secret.encode(), msg.encode(), hashlib.sha256).digest().hex()
+
+def _bitget_headers(cfg: dict, method: str, path: str, body: str = "") -> dict:
+    ts = str(int(time.time() * 1000))
+    sig = _bitget_sign(cfg["api_secret"], ts, method, path, body)
+    return {
+        "ACCESS-KEY":        cfg["api_key"],
+        "ACCESS-SIGN":       sig,
+        "ACCESS-TIMESTAMP":  ts,
+        "ACCESS-PASSPHRASE": cfg["passphrase"],
+        "Content-Type":      "application/json",
+        "locale":            "en-US",
+    }
+
+def _bitget_base(cfg: dict) -> str:
+    if cfg.get("sandbox"):
+        return "https://api.bitget.com"   # Bitget non ha sandbox separato; usiamo paper trading via accountType
+    return "https://api.bitget.com"
+
+def bitget_test_connection(cfg: dict):
     try:
-        r=requests.get(f"{BIN}/klines",timeout=10,params={"symbol":pair,"interval":tf,"limit":n})
-        if r.status_code!=200: return pd.DataFrame()
-        df=pd.DataFrame(r.json(),columns=["ts","open","high","low","close","volume","a","b","c","d","e","f"])
-        for c in ["open","high","low","close","volume"]: df[c]=pd.to_numeric(df[c],errors="coerce")
-        df["ts"]=pd.to_datetime(df["ts"],unit="ms"); df.set_index("ts",inplace=True)
-        return df.dropna(subset=["open","high","low","close"])
-    except: return pd.DataFrame()
+        path = "/api/v2/account/info"
+        base = _bitget_base(cfg)
+        headers = _bitget_headers(cfg, "GET", path)
+        r = requests.get(base + path, headers=headers, timeout=8)
+        data = r.json()
+        if data.get("code") == "00000":
+            uid = data.get("data", {}).get("userId", "—")
+            return True, f"UserID {uid}"
+        return False, data.get("msg", str(data))
+    except Exception as e:
+        return False, str(e)
 
-@st.cache_data(ttl=60,show_spinner=False)
-def _kuc_ohlcv(pair,tf,n):
+def bitget_get_balance(cfg: dict):
     try:
-        kf=TF_KUC.get(tf); et=int(time.time())
-        r=requests.get(f"{KUC}/market/candles",timeout=10,
-            params={"symbol":pair,"type":kf,"endAt":et,"startAt":et-n*_tfsec(tf)})
-        if r.status_code!=200: return pd.DataFrame()
-        data=r.json().get("data",[])
-        if not data: return pd.DataFrame()
-        df=pd.DataFrame(data,columns=["ts","open","close","high","low","volume","amount"])
-        for c in ["open","high","low","close","volume"]: df[c]=pd.to_numeric(df[c],errors="coerce")
-        df["ts"]=pd.to_datetime(df["ts"].astype(int),unit="s"); df.set_index("ts",inplace=True)
-        return df.sort_index().dropna(subset=["open","high","low","close"])
-    except: return pd.DataFrame()
+        path = "/api/v2/mix/account/accounts?productType=USDT-FUTURES"
+        headers = _bitget_headers(cfg, "GET", path)
+        r = requests.get(_bitget_base(cfg) + path, headers=headers, timeout=8)
+        data = r.json()
+        if data.get("code") == "00000":
+            result = {}
+            for item in data.get("data", []):
+                coin = item.get("marginCoin", "USDT")
+                result[coin] = {
+                    "available": item.get("available", "0"),
+                    "equity":    item.get("equity",    "0"),
+                    "unrealized":item.get("unrealizedPL", "0"),
+                }
+            return result
+        return None
+    except Exception:
+        return None
 
-@st.cache_data(ttl=60,show_spinner=False)
-def _okx_ohlcv(pair,tf,n):
+def bitget_get_positions(cfg: dict):
     try:
-        okf=TF_OKX.get(tf)
-        r=requests.get(f"{OKX}/market/history-candles",timeout=10,
-            params={"instId":pair,"bar":okf,"limit":min(n,300)})
-        if r.status_code!=200: return pd.DataFrame()
-        data=r.json().get("data",[])
-        if not data: return pd.DataFrame()
-        df=pd.DataFrame(data,columns=["ts","open","high","low","close","vol","a","b","c"])
-        for c in ["open","high","low","close","vol"]: df[c]=pd.to_numeric(df[c],errors="coerce")
-        df.rename(columns={"vol":"volume"},inplace=True)
-        df["ts"]=pd.to_datetime(df["ts"].astype(int),unit="ms"); df.set_index("ts",inplace=True)
-        return df.sort_index().dropna(subset=["open","high","low","close"])
-    except: return pd.DataFrame()
+        path = "/api/v2/mix/position/all-position?productType=USDT-FUTURES&marginCoin=USDT"
+        headers = _bitget_headers(cfg, "GET", path)
+        r = requests.get(_bitget_base(cfg) + path, headers=headers, timeout=8)
+        data = r.json()
+        if data.get("code") == "00000":
+            rows = []
+            for p in data.get("data", []):
+                side = p.get("holdSide","")
+                size = float(p.get("total", 0))
+                if size == 0:
+                    continue
+                rows.append({
+                    "Simbolo":     p.get("symbol",""),
+                    "Direzione":   "🟢 LONG" if side=="long" else "🔴 SHORT",
+                    "Dimensione":  size,
+                    "Entry ($)":   float(p.get("openPriceAvg", 0)),
+                    "Mark ($)":    float(p.get("markPrice", 0)),
+                    "PnL ($)":     float(p.get("unrealizedPL", 0)),
+                    "Leva":        p.get("leverage","—"),
+                })
+            return rows
+        return []
+    except Exception:
+        return []
 
-def get_ohlcv(coin,tf,n):
-    ex=coin["exchange"]; sym=coin["symbol"]; pair=coin["pair"]
-    order=[
-        (ex, {"Binance":(_bin_ohlcv,pair),"KuCoin":(_kuc_ohlcv,pair),"OKX":(_okx_ohlcv,pair)}.get(ex,(_bin_ohlcv,f"{sym}USDT"))),
-        ("Binance",(_bin_ohlcv,f"{sym}USDT")),
-        ("KuCoin", (_kuc_ohlcv,f"{sym}-USDT")),
-        ("OKX",    (_okx_ohlcv,f"{sym}-USDT")),
-    ]
-    seen_ex=set()
-    for src,(fn,p) in order:
-        if src in seen_ex: continue
-        seen_ex.add(src)
-        df=fn(p,tf,n)
-        if not df.empty: return df,src
-    return pd.DataFrame(),"—"
+def bitget_place_order(cfg: dict, symbol: str, side: str, size: float,
+                       sl: float, tp: float, leverage: int = 5):
+    """Apre un ordine futures su Bitget (paper o live in base a cfg)."""
+    try:
+        path = "/api/v2/mix/order/place-order"
+        body_dict = {
+            "symbol":       symbol + "USDT",
+            "productType":  "USDT-FUTURES",
+            "marginMode":   "isolated",
+            "marginCoin":   "USDT",
+            "size":         str(round(size, 4)),
+            "side":         "buy"  if side == "LONG" else "sell",
+            "tradeSide":    "open",
+            "orderType":    "market",
+            "presetStopLossPrice":   str(round(sl, 6)),
+            "presetStopSurplusPrice":str(round(tp, 6)),
+        }
+        body = json.dumps(body_dict)
+        headers = _bitget_headers(cfg, "POST", path, body)
+        r = requests.post(_bitget_base(cfg) + path, headers=headers,
+                          data=body, timeout=10)
+        return r.json()
+    except Exception as e:
+        return {"error": str(e)}
 
-# ── INDICATORI ─────────────────────────────────────────────────────────────
 
-def ema(s,p): return s.ewm(span=p,adjust=False).mean()
-def rsi14(s,p=14):
-    d=s.diff(); g=d.clip(lower=0).rolling(p).mean()
-    l=(-d.clip(upper=0)).rolling(p).mean()
-    return (100-(100/(1+g/l.replace(0,np.nan)))).fillna(50)
-def macd_ind(s):
-    m=ema(s,12)-ema(s,26); sig=m.ewm(span=9,adjust=False).mean(); return m,sig,m-sig
-def boll(s,p=20,k=2):
-    m=s.rolling(p).mean(); sd=s.rolling(p).std(); return m+sd*k,m-sd*k,m
-def atr14(df,p=14):
-    h,l,c=df["high"],df["low"],df["close"]
-    return pd.concat([h-l,(h-c.shift()).abs(),(l-c.shift()).abs()],axis=1).max(axis=1).rolling(p).mean()
-def adx_full(df,p=14):
-    h,l,c=df["high"].values,df["low"].values,df["close"].values
-    n=len(df); pdm=np.zeros(n); mdm=np.zeros(n); tra=np.zeros(n)
-    for i in range(1,n):
-        u=h[i]-h[i-1]; d_=l[i-1]-l[i]
-        if u>d_ and u>0: pdm[i]=u
-        if d_>u and d_>0: mdm[i]=d_
-        tra[i]=max(h[i]-l[i],abs(h[i]-c[i-1]),abs(l[i]-c[i-1]))
-    def rma(a,per):
-        o=np.zeros(n); al=1/per
-        if per<n: o[per]=np.mean(a[:per+1])
-        for i in range(per+1,n): o[i]=o[i-1]*(1-al)+a[i]*al
-        return o
-    at=rma(tra,p); pdi=np.where(at>0,100*rma(pdm,p)/at,0); mdi=np.where(at>0,100*rma(mdm,p)/at,0)
-    sm=pdi+mdi; dx=np.where(sm>0,100*np.abs(pdi-mdi)/sm,0); idx=df.index
-    return pd.Series(rma(dx,p),index=idx),pd.Series(pdi,index=idx),pd.Series(mdi,index=idx)
-def stoch14(df,k=14,d=3):
-    lo=df["low"].rolling(k).min(); hi=df["high"].rolling(k).max()
-    K=100*(df["close"]-lo)/(hi-lo).replace(0,np.nan)
-    return K.fillna(50),K.rolling(d).mean().fillna(50)
+# ─────────────────────────────────────────────────────────────────────────────
+# ── DATI BINANCE ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+
+@st.cache_data(ttl=3600)
+def get_top_crypto_pairs(limit: int = 300):
+    try:
+        data = requests.get(
+            "https://api.binance.com/api/v3/ticker/24hr", timeout=15
+        ).json()
+        pairs = sorted(
+            [d for d in data if d["symbol"].endswith("USDT")],
+            key=lambda x: float(x["quoteVolume"]), reverse=True
+        )[:limit]
+        result = []
+        for p in pairs:
+            coin = p["symbol"].replace("USDT", "")
+            result.append({
+                "symbol":  p["symbol"],
+                "coin":    coin,
+                "price":   float(p["lastPrice"]),
+                "volume":  float(p["quoteVolume"]),
+                "display": f"{coin} — ${float(p['lastPrice']):,.4f} (vol ${float(p['quoteVolume'])/1e9:.1f}B)",
+            })
+        return result
+    except Exception:
+        return [{"symbol":"BTCUSDT","coin":"BTC","price":0,"volume":0,"display":"BTC"}]
+
+@st.cache_data(ttl=60)
+def get_ohlcv(symbol: str, interval: str = "1h", limit: int = 300) -> pd.DataFrame:
+    try:
+        data = requests.get(
+            "https://api.binance.com/api/v3/klines",
+            params={"symbol": symbol, "interval": interval, "limit": limit},
+            timeout=10,
+        ).json()
+        if not data:
+            return pd.DataFrame()
+        df = pd.DataFrame(data, columns=[
+            "ts","open","high","low","close","volume",
+            "cts","qav","trades","tbbase","tbquote","ignore"
+        ])
+        for c in ["open","high","low","close","volume"]:
+            df[c] = df[c].astype(float)
+        df["ts"] = pd.to_datetime(df["ts"], unit="ms")
+        df.set_index("ts", inplace=True)
+        return df[["open","high","low","close","volume"]]
+    except Exception:
+        return pd.DataFrame()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ── INDICATORI TECNICI ────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+
+def ema(s, p):    return s.ewm(span=p, adjust=False).mean()
+def sma(s, p):    return s.rolling(p).mean()
+def stdev(s, p):  return s.rolling(p).std()
+
+def rsi14(s, p=14):
+    d = s.diff()
+    g = d.where(d>0,0).ewm(alpha=1/p,adjust=False).mean()
+    l = (-d.where(d<0,0)).ewm(alpha=1/p,adjust=False).mean()
+    rs = g / l.replace(0, np.nan)
+    return 100 - 100/(1+rs)
+
+def macd_ind(s, f=12, sl=26, sig=9):
+    m = ema(s,f) - ema(s,sl)
+    sg = ema(m,sig)
+    return m, sg, m-sg
+
+def boll(s, p=20, k=2):
+    mid = sma(s,p)
+    std_ = stdev(s,p)
+    return mid+k*std_, mid-k*std_, mid
+
+def atr14(df, p=14):
+    h,l,c = df["high"],df["low"],df["close"]
+    tr = pd.concat([h-l, (h-c.shift()).abs(), (l-c.shift()).abs()],axis=1).max(axis=1)
+    return tr.ewm(alpha=1/p, adjust=False).mean()
+
+def adx_full(df, p=14):
+    h,l,c = df["high"],df["low"],df["close"]
+    up = h.diff(); dn = -l.diff()
+    pdm = up.where((up>dn)&(up>0),0.0)
+    ndm = dn.where((dn>up)&(dn>0),0.0)
+    atr_ = atr14(df,p)
+    pdi = 100*(pdm.ewm(alpha=1/p,adjust=False).mean()/atr_.replace(0,np.nan))
+    ndi = 100*(ndm.ewm(alpha=1/p,adjust=False).mean()/atr_.replace(0,np.nan))
+    dx  = 100*(pdi-ndi).abs()/(pdi+ndi).replace(0,np.nan)
+    return dx.ewm(alpha=1/p,adjust=False).mean(), pdi, ndi
+
+def stoch14(df, k=14, d=3):
+    lo = df["low"].rolling(k).min()
+    hi = df["high"].rolling(k).max()
+    pct = 100*(df["close"]-lo)/(hi-lo).replace(0,np.nan)
+    return pct, pct.rolling(d).mean()
+
 def vwap(df):
-    tp=(df["high"]+df["low"]+df["close"])/3
-    return (tp*df["volume"].replace(0,np.nan)).cumsum()/df["volume"].replace(0,np.nan).cumsum()
-def supertrend(df,p=10,m=3.0):
-    at=atr14(df,p).values; hl=((df["high"]+df["low"])/2).values; cl=df["close"].values
-    n=len(df); ub=hl+m*at; lb=hl-m*at; fub,flb=ub.copy(),lb.copy()
-    d=np.ones(n,dtype=int); sv=np.full(n,np.nan)
-    for i in range(1,n):
-        fub[i]=min(ub[i],fub[i-1]) if cl[i-1]<=fub[i-1] else ub[i]
-        flb[i]=max(lb[i],flb[i-1]) if cl[i-1]>=flb[i-1] else lb[i]
-        if cl[i]>fub[i-1]: d[i]=1
-        elif cl[i]<flb[i-1]: d[i]=-1
-        else: d[i]=d[i-1]
-        sv[i]=flb[i] if d[i]==1 else fub[i]
-    return pd.Series(sv,index=df.index),pd.Series(d.astype(float),index=df.index)
-def cci20(df,p=20):
-    tp=(df["high"]+df["low"]+df["close"])/3; m=tp.rolling(p).mean()
-    md=tp.rolling(p).apply(lambda x:np.abs(x-x.mean()).mean(),raw=True)
-    return ((tp-m)/(0.015*md.replace(0,np.nan))).fillna(0)
-def pivot_sr(df,n=5):
-    hi=df["high"].rolling(n*2+1,center=True).max()
-    lo=df["low"].rolling(n*2+1,center=True).min()
-    r=df["high"][df["high"]==hi].dropna().tail(4).values.tolist()
-    s=df["low"][df["low"]==lo].dropna().tail(4).values.tolist()
-    return r,s
+    tp = (df["high"]+df["low"]+df["close"])/3
+    cum_tpv = (tp*df["volume"]).cumsum()
+    cum_v   = df["volume"].cumsum()
+    return cum_tpv/cum_v.replace(0,np.nan)
 
-def add_all(df,eps):
-    df=df.copy(); cl=df["close"]
-    for p in eps: df[f"EMA_{p}"]=ema(cl,p)
-    df["RSI"]=rsi14(cl)
-    df["MACD"],df["MACD_sig"],df["MACD_hist"]=macd_ind(cl)
-    df["BB_up"],df["BB_dn"],df["BB_mid"]=boll(cl)
-    df["ATR"]=atr14(df)
-    df["ADX"],df["DI_p"],df["DI_m"]=adx_full(df)
-    df["SK"],df["SD"]=stoch14(df)
-    df["VWAP"]=vwap(df)
-    df["ST"],df["ST_d"]=supertrend(df)
-    df["CCI"]=cci20(df)
-    df["VOLMA"]=df["volume"].rolling(20).mean()
+def cci20(df, p=20):
+    tp = (df["high"]+df["low"]+df["close"])/3
+    ma = tp.rolling(p).mean()
+    md = tp.rolling(p).apply(lambda x: np.abs(x-x.mean()).mean(), raw=True)
+    return (tp-ma)/(0.015*md.replace(0,np.nan))
+
+def supertrend(df, p=10, mult=3.0):
+    atr_ = atr14(df, p)
+    hl2  = (df["high"]+df["low"])/2
+    upper = hl2 + mult*atr_
+    lower = hl2 - mult*atr_
+    st_up  = pd.Series(np.nan, index=df.index)
+    st_dn  = pd.Series(np.nan, index=df.index)
+    direction = pd.Series(1, index=df.index)
+    for i in range(1, len(df)):
+        p_up = lower.iloc[i]
+        p_dn = upper.iloc[i]
+        if st_dn.iloc[i-1] is not np.nan and not np.isnan(st_dn.iloc[i-1]):
+            p_up = max(p_up, st_up.iloc[i-1]) if df["close"].iloc[i-1]>st_up.iloc[i-1] else p_up
+        if st_up.iloc[i-1] is not np.nan and not np.isnan(st_up.iloc[i-1]):
+            p_dn = min(p_dn, st_dn.iloc[i-1]) if df["close"].iloc[i-1]<st_dn.iloc[i-1] else p_dn
+        st_up.iloc[i] = p_up; st_dn.iloc[i] = p_dn
+        prev_dir = direction.iloc[i-1]
+        if prev_dir == 1:
+            direction.iloc[i] = 1 if df["close"].iloc[i] >= st_up.iloc[i] else -1
+        else:
+            direction.iloc[i] = -1 if df["close"].iloc[i] <= st_dn.iloc[i] else 1
+    st_line = pd.Series(np.where(direction==1, st_up, st_dn), index=df.index)
+    return st_line, direction
+
+def pivot_sr(df, window=10):
+    hi = df["high"]; lo = df["low"]
+    levels = []
+    for i in range(window, len(df)-window):
+        if hi.iloc[i] == hi.iloc[i-window:i+window+1].max():
+            levels.append(("R", float(hi.iloc[i])))
+        if lo.iloc[i] == lo.iloc[i-window:i+window+1].min():
+            levels.append(("S", float(lo.iloc[i])))
+    return levels[-10:]
+
+def add_all_indicators(df, ema_ps=(20,50,200)):
+    df = df.copy()
+    c = df["close"]
+    for p in ema_ps:
+        df[f"EMA_{p}"] = ema(c, p)
+    df["RSI"] = rsi14(c)
+    df["MACD"], df["MACD_sig"], df["MACD_hist"] = macd_ind(c)
+    df["BB_up"], df["BB_lo"], df["BB_mid"] = boll(c)
+    df["ATR"] = atr14(df)
+    df["ADX"], df["DI_plus"], df["DI_minus"] = adx_full(df)
+    df["STOCH_K"], df["STOCH_D"] = stoch14(df)
+    df["VWAP"] = vwap(df)
+    df["CCI"] = cci20(df)
+    df["VOLMA"] = sma(df["volume"], 20)
+    df["ST_line"], df["ST_dir"] = supertrend(df)
     return df
 
-# ── HTF SCORE ──────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# ── MOTORE SEGNALE JARVIS V3 ─────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
 
-def _score_df(df):
-    if df.empty or len(df)<30: return 50
-    cl=df["close"]; sc=50
-    e20=ema(cl,20).iloc[-1]; e50=ema(cl,50).iloc[-1]; pr=cl.iloc[-1]
-    if pr>e20: sc+=10
-    if pr>e50: sc+=10
-    if e20>e50: sc+=8
-    rv=rsi14(cl).iloc[-1]
-    if rv>55: sc+=10
-    elif rv<45: sc-=10
-    m,sig,_=macd_ind(cl)
-    if m.iloc[-1]>sig.iloc[-1]: sc+=10
-    else: sc-=10
-    _,std=supertrend(df)
-    if std.iloc[-1]==1: sc+=12
-    else: sc-=12
-    return max(0,min(100,sc))
+class JarvisEngine:
+    def __init__(self, k=12, hist=500):
+        self.k = k
+        self.feat_hist  = deque(maxlen=hist)
+        self.label_hist = deque(maxlen=hist)
 
-@st.cache_data(ttl=60,show_spinner=False)
-def get_htf(coin,tf):
-    htf=TF_HIGHER.get(tf,tf)
-    if htf==tf: return 50,"stesso TF"
-    df,_=get_ohlcv(coin,htf,80)
-    return _score_df(df),htf
+    def _features(self, df):
+        c = df["close"]
+        rsi_v = float(df["RSI"].iloc[-1]) if "RSI" in df.columns else 50
+        cci_v = float(df["CCI"].iloc[-1]) if "CCI" in df.columns else 0
+        rsi_n = np.clip((rsi_v - 30)/40, 0, 1)
+        cci_n = np.clip((cci_v + 200)/400, 0, 1)
+        return np.array([rsi_n, cci_n])
 
-# ── SEGNALI FRECCE ─────────────────────────────────────────────────────────
+    def update(self, df, label):
+        self.feat_hist.append(self._features(df))
+        self.label_hist.append(label)
 
-def detect_signals(df,eps):
-    if len(df)<30: return []
-    cl=df["close"]; rv=rsi14(cl); m,sig,_=macd_ind(cl)
-    _,std=supertrend(df); adx,pdi,mdi=adx_full(df)
-    sigs=[]
-    for i in range(2,len(df)):
-        sc=0
-        if rv.iloc[i]>30 and rv.iloc[i-1]<=30: sc+=2
-        if rv.iloc[i]<70 and rv.iloc[i-1]>=70: sc-=2
-        if m.iloc[i]>sig.iloc[i] and m.iloc[i-1]<=sig.iloc[i-1]: sc+=2
-        if m.iloc[i]<sig.iloc[i] and m.iloc[i-1]>=sig.iloc[i-1]: sc-=2
-        if std.iloc[i]==1 and std.iloc[i-1]==-1: sc+=3
-        if std.iloc[i]==-1 and std.iloc[i-1]==1: sc-=3
-        if adx.iloc[i]>25 and pdi.iloc[i]>mdi.iloc[i]: sc+=1
-        if adx.iloc[i]>25 and pdi.iloc[i]<mdi.iloc[i]: sc-=1
-        if sc>=4: sigs.append({"t":df.index[i],"type":"LONG","y":df["low"].iloc[i]*0.9985})
-        elif sc<=-4: sigs.append({"t":df.index[i],"type":"SHORT","y":df["high"].iloc[i]*1.0015})
-    return sigs[-20:]
+    def knn_predict(self, df):
+        if len(self.feat_hist) < self.k:
+            return 0
+        cur = self._features(df)
+        X = np.array(list(self.feat_hist))
+        y = np.array(list(self.label_hist))
+        dists = np.sqrt(((np.log1p(X) - np.log1p(cur))**2).sum(axis=1))
+        idx   = np.argsort(dists)[:self.k]
+        return 1 if y[idx].sum() > 0 else -1
 
-# ── RISK MANAGER ───────────────────────────────────────────────────────────
+    def signal(self, df, ema_ps, threshold=60, htf_score=50):
+        if df.empty or len(df) < 60:
+            return self._neutral("Dati insufficienti")
 
-def risk_calc(price,atr_v,capital,risk_pct,direction,rr):
-    ra=capital*risk_pct/100; sld=atr_v*1.5
-    if direction=="LONG":
-        sl=price-sld; tp1=price+sld*rr; tp2=price+sld*rr*1.618
-    else:
-        sl=price+sld; tp1=price-sld*rr; tp2=price-sld*rr*1.618
-    size=ra/sld if sld>0 else 0
-    return {"sl":sl,"tp1":tp1,"tp2":tp2,"size":size,
-            "risk_usd":ra,"sl_pct":sld/price*100,"rr":rr}
+        # ── REGIME GATE ──────────────────────────────────────────────────────
+        adx_v = float(df["ADX"].iloc[-1]) if "ADX" in df.columns else 0
+        atr_v = float(df["ATR"].iloc[-1]) if "ATR" in df.columns else 0
+        px    = float(df["close"].iloc[-1])
+        atr_p = atr_v/px*100 if px else 0
+        if adx_v < ADX_TREND_GATE:
+            return self._neutral(f"ADX {adx_v:.0f} < {ADX_TREND_GATE} — mercato laterale")
+        if atr_p < ATR_MIN_PCT:
+            return self._neutral(f"ATR {atr_p:.2f}% < {ATR_MIN_PCT}% — troppo piatto")
 
-# ── JARVIS ENGINE ──────────────────────────────────────────────────────────
+        c = df["close"]
+        long_s = 0; short_s = 0
+        rl = []; rs = []
 
-class Jarvis:
-    def __init__(self):
-        self.fh=deque(maxlen=500); self.dh=deque(maxlen=500)
-    def _f(self,df):
-        rv=rsi14(df["close"]); tp=(df["high"]+df["low"]+df["close"])/3
-        m=tp.rolling(20).mean(); md=tp.rolling(20).apply(lambda x:np.abs(x-x.mean()).mean(),raw=True)
-        cc=(tp-m)/(0.015*md.replace(0,np.nan))
-        return pd.DataFrame({"r":((rv.fillna(50)-30)/40).clip(0,1),
-                             "c":((cc.fillna(0)+200)/400).clip(0,1)}).fillna(0.5)
-    def knn(self,df,k=8):
-        f=self._f(df).iloc[-1].values
-        if len(self.fh)<k: return 0
-        X=np.array(self.fh); y=np.array(self.dh)
-        return 1 if y[np.argsort(np.sqrt(((f-X)**2).sum(axis=1)))[:k]].sum()>0 else -1
-    def update(self,df,d): self.fh.append(self._f(df).iloc[-1].values); self.dh.append(d)
-    def score(self,df,eps,htf_sc=50):
-        sc=0; rs=[]; kd=self.knn(df)
-        if kd!=0: sc+=15; rs.append("🧠 k-NN: +15")
-        ev={p:df[f"EMA_{p}"].iloc[-1] for p in eps if f"EMA_{p}" in df.columns}; sp=sorted(ev)
-        if len(sp)>=2:
-            if all(ev[sp[i]]>ev[sp[i+1]] for i in range(len(sp)-1)): sc+=15; rs.append("📈 EMA bull: +15")
-            elif all(ev[sp[i]]<ev[sp[i+1]] for i in range(len(sp)-1)): sc+=15; rs.append("📉 EMA bear: +15")
-        if "MACD" in df.columns and df["MACD"].iloc[-1]>df["MACD_sig"].iloc[-1]: sc+=8; rs.append("📊 MACD bull: +8")
-        if "RSI" in df.columns:
-            rv=df["RSI"].iloc[-1]
-            if rv<30: sc+=12; rs.append("📊 RSI oversold: +12")
-            elif rv>70: sc+=12; rs.append("📊 RSI overbought: +12")
-            elif 40<rv<60: sc+=4; rs.append("📊 RSI neutro: +4")
-        if "ST_d" in df.columns:
-            s=df["ST_d"].iloc[-1]
-            if s==1: sc+=12; rs.append("🌊 SuperTrend ↑: +12")
-            elif s==-1: sc+=12; rs.append("🌊 SuperTrend ↓: +12")
-        if "ADX" in df.columns and df["ADX"].iloc[-1]>25: sc+=8; rs.append("💪 ADX>25: +8")
-        hb=int((htf_sc-50)/8)
-        if hb: sc+=hb; rs.append(f"📡 HTF: {hb:+d}")
-        if "VOLMA" in df.columns and df["volume"].iloc[-1]>df["VOLMA"].iloc[-1]*1.5:
-            sc+=5; rs.append("🔊 Vol spike: +5")
-        return max(0,min(100,sc)),rs,kd
-    def signal(self,df,eps,thr,htf_sc=50):
-        sc,rs,kd=self.score(df,eps,htf_sc)
-        if sc>=thr: sig="LONG" if (kd==1 or sc>=75) else ("SHORT" if kd==-1 else "NEUTRAL")
-        else: sig="NEUTRAL"
-        return {"signal":sig,"confidence":sc,"reasons":rs,"knn":kd}
+        # EMA stack (18 pt)
+        ema_vs = {p: float(df[f"EMA_{p}"].iloc[-1]) for p in ema_ps if f"EMA_{p}" in df.columns}
+        srt = sorted(ema_vs)
+        if len(srt) >= 2:
+            if all(ema_vs[srt[i]] > ema_vs[srt[i+1]] for i in range(len(srt)-1)) and px > ema_vs[srt[0]]:
+                long_s += 18; rl.append("✅ EMA stack bullish perfetto")
+            elif all(ema_vs[srt[i]] < ema_vs[srt[i+1]] for i in range(len(srt)-1)) and px < ema_vs[srt[0]]:
+                short_s += 18; rs.append("✅ EMA stack bearish perfetto")
+            else:
+                rl.append("⚠️ EMA in conflitto"); rs.append("⚠️ EMA in conflitto")
 
-# ── GRAFICO ────────────────────────────────────────────────────────────────
+        # SuperTrend (22 pt)
+        if "ST_dir" in df.columns:
+            std = int(df["ST_dir"].iloc[-1])
+            if std == 1:   long_s  += 22; rl.append("✅ SuperTrend BULL")
+            elif std == -1:short_s += 22; rs.append("✅ SuperTrend BEAR")
 
-def make_chart(df,eps,overlays,osc_sel,signals,rk,direction,exchange,height):
-    INC,DEC="#26a69a","#ef5350"
-    cl=df["close"]; lo=df["low"]; hi=df["high"]
+        # kNN (14 pt)
+        knn = self.knn_predict(df)
+        if knn == 1:   long_s  += 14; rl.append("✅ kNN rialzista")
+        elif knn == -1:short_s += 14; rs.append("✅ kNN ribassista")
 
-    # Calcolo range Y REALE — questo è il fix definitivo
-    y_lo = float(lo.min()); y_hi = float(hi.max()); y_pad=(y_hi-y_lo)*0.05
-    y_min = y_lo - y_pad; y_max = y_hi + y_pad
+        # CVD divergence (12 / 10 pt)
+        if "volume" in df.columns:
+            delta = df["volume"] * np.sign(c.diff().fillna(0))
+            cvd   = delta.cumsum()
+            pl_lo = df["close"].rolling(20).min()
+            cv_lo = cvd.rolling(20).min()
+            ph_hi = df["close"].rolling(20).max()
+            cv_hi = cvd.rolling(20).max()
+            if c.iloc[-1] <= pl_lo.iloc[-1]*1.01 and cvd.iloc[-1] > cv_lo.iloc[-1]:
+                long_s  += 12; rl.append("✅ CVD assorbimento long")
+            if c.iloc[-1] >= ph_hi.iloc[-1]*0.99 and cvd.iloc[-1] < cv_hi.iloc[-1]:
+                short_s += 10; rs.append("✅ CVD assorbimento short")
 
-    # Oscillatori da mettere in subplot separati SOLO se selezionati
-    sub_oscs=[(k,l,c) for k,l,c in [
-        ("RSI","RSI","#ce93d8"),("MACD","MACD","#2196f3"),
-        ("Stoch","Stoch","#4fc3f7"),("ADX","ADX","#ffeb3b"),
-        ("CCI","CCI","#80cbc4")] if k in osc_sel]
-    n_sub=len(sub_oscs)
+        # HTF bias (10 pt)
+        if htf_score >= 60:
+            long_s  += 10; rl.append(f"✅ HTF score {htf_score}/100 bullish")
+        elif htf_score <= 40:
+            short_s += 10; rs.append(f"✅ HTF score {htf_score}/100 bearish")
 
-    # Proporzioni righe: 1=prezzo grande, 2=volume piccolo, 3+=oscillatori
-    if n_sub==0:
-        row_h=[0.88,0.12]; n_rows=2
-    else:
-        osc_h=0.20/n_sub
-        price_h=0.62; vol_h=0.08
-        row_h=[price_h,vol_h]+[osc_h]*n_sub
-        n_rows=2+n_sub
+        # MACD (4 pt — solo conferma)
+        if "MACD" in df.columns:
+            if float(df["MACD"].iloc[-1]) > float(df["MACD_sig"].iloc[-1]):
+                long_s += 4; rl.append("✅ MACD conferma long")
+            else:
+                short_s += 4; rs.append("✅ MACD conferma short")
 
-    fig=make_subplots(rows=n_rows,cols=1,shared_xaxes=True,
-        vertical_spacing=0.02,row_heights=row_h,
-        subplot_titles=(["",""]+ [l for _,l,_ in sub_oscs]) if n_sub else ["",""])
+        # RSI (4 pt — solo filtro)
+        rsi_v = float(df["RSI"].iloc[-1]) if "RSI" in df.columns else 50
+        if rsi_v < 35:   long_s  += 4; rl.append(f"✅ RSI {rsi_v:.0f} oversold")
+        elif rsi_v > 65: short_s += 4; rs.append(f"✅ RSI {rsi_v:.0f} overbought")
 
-    # ── Candele ──
-    fig.add_trace(go.Candlestick(
-        x=df.index,open=df["open"],high=hi,low=lo,close=cl,name="Prezzo",
-        increasing=dict(line=dict(color=INC,width=1),fillcolor=INC),
-        decreasing=dict(line=dict(color=DEC,width=1),fillcolor=DEC),
-        whiskerwidth=0.85),row=1,col=1)
+        # ADX boost (8 pt)
+        if adx_v >= 30:
+            if long_s > short_s:   long_s  += 8; rl.append(f"✅ ADX {adx_v:.0f} trend forte")
+            elif short_s > long_s: short_s += 8; rs.append(f"✅ ADX {adx_v:.0f} trend forte")
 
-    # ── Volume (barre basse proporzionate al range Y del prezzo) ──
-    vol_max=df["volume"].max()
-    vol_h_range=(y_hi-y_lo)*0.14
-    vol_y=y_min+(df["volume"]/(vol_max if vol_max>0 else 1)*vol_h_range)
-    vc=[INC if c>=o else DEC for c,o in zip(cl,df["open"])]
-    fig.add_trace(go.Bar(x=df.index,y=vol_y-y_min,base=y_min,name="Vol",
-        marker_color=vc,opacity=0.22,
-        hovertemplate="Vol: %{customdata:,.0f}<extra></extra>",
-        customdata=df["volume"]),row=1,col=1)
+        # Volume (8 pt)
+        if "VOLMA" in df.columns:
+            vc = float(df["volume"].iloc[-1]); vm = float(df["VOLMA"].iloc[-1])
+            if vc > vm*1.3:
+                if long_s > short_s:   long_s  += 8; rl.append("✅ Volume sopra media")
+                elif short_s > long_s: short_s += 8; rs.append("✅ Volume sopra media")
 
-    # ── EMA ──
-    EC={5:"#00e5ff",10:"#69f0ae",20:"#ffeb3b",50:"#ff9800",100:"#ce93d8",200:"#ef9a9a"}
-    for p in eps:
-        if f"EMA_{p}" in df.columns:
-            fig.add_trace(go.Scatter(x=df.index,y=df[f"EMA_{p}"],name=f"EMA{p}",
-                line=dict(color=EC.get(p,"#888"),width=1.6),opacity=0.9),row=1,col=1)
+        # Normalizza 0-100
+        max_pts = 100
+        long_s  = min(100, int(long_s  / max_pts * 100)) if max_pts else long_s
+        short_s = min(100, int(short_s / max_pts * 100)) if max_pts else short_s
 
-    # ── Bollinger ──
-    if "BB" in overlays and "BB_up" in df.columns:
-        fig.add_trace(go.Scatter(x=df.index,y=df["BB_up"],name="BB↑",
-            line=dict(color="rgba(120,160,255,0.55)",width=1,dash="dot")),row=1,col=1)
-        fig.add_trace(go.Scatter(x=df.index,y=df["BB_dn"],name="BB↓",
-            line=dict(color="rgba(120,160,255,0.55)",width=1,dash="dot"),
-            fill="tonexty",fillcolor="rgba(120,160,255,0.04)"),row=1,col=1)
-        fig.add_trace(go.Scatter(x=df.index,y=df["BB_mid"],name="BB mid",
-            line=dict(color="rgba(200,200,200,0.18)",width=1)),row=1,col=1)
+        # Entrambi forti → NEUTRAL (mercato indeciso)
+        if long_s >= threshold and short_s >= threshold:
+            return {**self._neutral("Segnali contrari — mercato indeciso"),
+                    "long_score":long_s,"short_score":short_s,
+                    "reasons_long":rl,"reasons_short":rs,
+                    "adx":adx_v,"atr_pct":atr_p,"rsi":rsi_v}
 
-    # ── VWAP ──
-    if "VWAP" in overlays and "VWAP" in df.columns:
-        fig.add_trace(go.Scatter(x=df.index,y=df["VWAP"],name="VWAP",
-            line=dict(color="#ff6b6b",width=2,dash="dashdot")),row=1,col=1)
+        # Determina direzione
+        if long_s >= threshold and long_s > short_s:
+            signal = "LONG"; conf = long_s
+        elif short_s >= threshold and short_s > long_s:
+            signal = "SHORT"; conf = short_s
+        else:
+            return {**self._neutral("Score insufficiente"),
+                    "long_score":long_s,"short_score":short_s,
+                    "reasons_long":rl,"reasons_short":rs,
+                    "adx":adx_v,"atr_pct":atr_p,"rsi":rsi_v}
 
-    # ── SuperTrend ──
-    if "SuperTrend" in overlays and "ST" in df.columns:
-        fig.add_trace(go.Scatter(x=df.index,y=df["ST"].where(df["ST_d"]==1),
-            name="ST↑",line=dict(color="#00e676",width=2.5),connectgaps=False),row=1,col=1)
-        fig.add_trace(go.Scatter(x=df.index,y=df["ST"].where(df["ST_d"]==-1),
-            name="ST↓",line=dict(color="#ff1744",width=2.5),connectgaps=False),row=1,col=1)
+        # SL/TP con slippage incluso (0.08% round trip)
+        slip = px * 0.0004
+        sl_d = atr_v * 1.5
+        if signal == "LONG":
+            entry = px + slip
+            sl    = px - sl_d
+            tp1   = px + sl_d*2.0
+            tp2   = px + sl_d*3.236
+        else:
+            entry = px - slip
+            sl    = px + sl_d
+            tp1   = px - sl_d*2.0
+            tp2   = px - sl_d*3.236
 
-    # ── Support / Resistance ──
-    if "S/R" in overlays:
-        res_lvls,sup_lvls=pivot_sr(df)
-        for lv in res_lvls:
-            if y_min<lv<y_max:
-                fig.add_hline(y=lv,line_dash="dot",line_color="rgba(239,83,80,0.5)",
-                    line_width=1.2,row=1,col=1,
-                    annotation_text=f"R {lv:.5g}",
-                    annotation_font_color="rgba(239,83,80,0.85)",
-                    annotation_position="left")
-        for lv in sup_lvls:
-            if y_min<lv<y_max:
-                fig.add_hline(y=lv,line_dash="dot",line_color="rgba(38,166,154,0.5)",
-                    line_width=1.2,row=1,col=1,
-                    annotation_text=f"S {lv:.5g}",
-                    annotation_font_color="rgba(38,166,154,0.85)",
-                    annotation_position="left")
+        # Leva dinamica Kelly
+        kelly = max(0.05, min(0.25, (conf/100*1.5 - (1-conf/100))/1.5 * 0.25))
+        risk_frac = abs(px - sl) / px if px else 0.02
+        leverage  = int(np.clip(kelly / risk_frac if risk_frac else 5, 1, 10))
+        if adx_v > 30: leverage = min(leverage+1, 10)
+        if atr_p > 2.5: leverage = max(leverage-1, 1)
 
-    # ── Frecce segnali ──
-    if signals:
-        lx=[s["t"] for s in signals if s["type"]=="LONG"]
-        ly=[s["y"] for s in signals if s["type"]=="LONG"]
-        sx=[s["t"] for s in signals if s["type"]=="SHORT"]
-        sy=[s["y"] for s in signals if s["type"]=="SHORT"]
-        if lx: fig.add_trace(go.Scatter(x=lx,y=ly,mode="markers",name="▲ LONG",
-            marker=dict(symbol="triangle-up",size=13,color="#00e676",
-                line=dict(width=1,color="#003300"))),row=1,col=1)
-        if sx: fig.add_trace(go.Scatter(x=sx,y=sy,mode="markers",name="▼ SHORT",
-            marker=dict(symbol="triangle-down",size=13,color="#ff1744",
-                line=dict(width=1,color="#330000"))),row=1,col=1)
+        regime = "TREND" if adx_v >= 25 else "LATERALE"
 
-    # ── SL / TP ──
-    if rk and direction!="NEUTRAL":
-        price=float(cl.iloc[-1])
-        clr_sl="#ff1744"; clr_tp="#00e676"
-        for lv,lbl,clr in [
-            (rk["sl"],f"SL  {rk['sl']:.5g}  (-{rk['sl_pct']:.2f}%)",clr_sl),
-            (rk["tp1"],f"TP1  {rk['tp1']:.5g}",clr_tp),
-            (rk["tp2"],f"TP2  {rk['tp2']:.5g}",clr_tp),
-        ]:
-            if y_min*0.8<lv<y_max*1.2:
-                fig.add_hline(y=lv,line_dash="solid" if "SL" in lbl else "dot",
-                    line_color=clr,line_width=1.8,row=1,col=1,
-                    annotation_text=lbl,annotation_font_color=clr,
-                    annotation_position="right")
-        lo_band=min(price,rk["sl"]); hi_band=max(price,rk["sl"])
-        fig.add_hrect(y0=lo_band,y1=hi_band,fillcolor="rgba(239,83,80,0.06)",
-            layer="below",line_width=0,row=1,col=1)
-        lo_tp=min(price,rk["tp1"]); hi_tp=max(price,rk["tp1"])
-        fig.add_hrect(y0=lo_tp,y1=hi_tp,fillcolor="rgba(38,166,154,0.06)",
-            layer="below",line_width=0,row=1,col=1)
+        return {
+            "signal":      signal, "confidence": conf,
+            "long_score":  long_s, "short_score": short_s,
+            "reasons_long":rl,     "reasons_short":rs,
+            "entry_px":    entry,  "sl":sl, "tp1":tp1, "tp2":tp2,
+            "leverage":    leverage, "adx":adx_v, "atr_pct":atr_p,
+            "rsi":         rsi_v,
+            "regime_msg":  f"{regime} · ADX {adx_v:.0f} · ATR {atr_p:.2f}%",
+        }
 
-    # ── Volume subplot ──
-    fig.add_trace(go.Bar(x=df.index,y=df["volume"],name="Vol",
-        marker_color=vc,opacity=0.65,showlegend=False,
-        hovertemplate="Vol: %{y:,.0f}<extra></extra>"),row=2,col=1)
+    @staticmethod
+    def _neutral(msg):
+        return {"signal":"NEUTRAL","confidence":0,"long_score":0,"short_score":0,
+                "reasons_long":[],"reasons_short":[f"⚠️ {msg}"],
+                "entry_px":0,"sl":None,"tp1":None,"tp2":None,
+                "leverage":1,"adx":0,"atr_pct":0,"rsi":50,
+                "regime_msg":msg}
 
-    # ── Oscillatori subplot ──
-    for idx_,(key,lbl,color) in enumerate(sub_oscs):
-        r=3+idx_
-        if key=="RSI" and "RSI" in df.columns:
-            fig.add_trace(go.Scatter(x=df.index,y=df["RSI"],name="RSI",
-                line=dict(color=color,width=1.8),showlegend=False),row=r,col=1)
-            for lv,c_ in [(70,"rgba(239,83,80,0.4)"),(50,"rgba(200,200,200,0.15)"),(30,"rgba(38,166,154,0.4)")]:
-                fig.add_hline(y=lv,line_dash="dash",line_color=c_,line_width=1,row=r,col=1)
-            fig.update_yaxes(range=[0,100],row=r,col=1)
-        elif key=="MACD" and "MACD" in df.columns:
-            hc=[INC if v>=0 else DEC for v in df["MACD_hist"]]
-            fig.add_trace(go.Bar(x=df.index,y=df["MACD_hist"],marker_color=hc,
-                opacity=0.7,name="Hist",showlegend=False),row=r,col=1)
-            fig.add_trace(go.Scatter(x=df.index,y=df["MACD"],name="MACD",
-                line=dict(color=color,width=1.5),showlegend=False),row=r,col=1)
-            fig.add_trace(go.Scatter(x=df.index,y=df["MACD_sig"],name="Sig",
-                line=dict(color="#ff9800",width=1.3,dash="dot"),showlegend=False),row=r,col=1)
-            fig.add_hline(y=0,line_color="rgba(255,255,255,0.1)",line_width=1,row=r,col=1)
-        elif key=="Stoch" and "SK" in df.columns:
-            fig.add_trace(go.Scatter(x=df.index,y=df["SK"],name="%K",
-                line=dict(color=color,width=1.8),showlegend=False),row=r,col=1)
-            fig.add_trace(go.Scatter(x=df.index,y=df["SD"],name="%D",
-                line=dict(color="#ff8a65",width=1.3,dash="dot"),showlegend=False),row=r,col=1)
-            for lv,c_ in [(80,"rgba(239,83,80,0.4)"),(20,"rgba(38,166,154,0.4)")]:
-                fig.add_hline(y=lv,line_dash="dash",line_color=c_,line_width=1,row=r,col=1)
-            fig.update_yaxes(range=[0,100],row=r,col=1)
-        elif key=="ADX" and "ADX" in df.columns:
-            fig.add_trace(go.Scatter(x=df.index,y=df["ADX"],name="ADX",
-                line=dict(color=color,width=1.8),showlegend=False),row=r,col=1)
-            fig.add_trace(go.Scatter(x=df.index,y=df["DI_p"],name="DI+",
-                line=dict(color="#69f0ae",width=1.2,dash="dot"),showlegend=False),row=r,col=1)
-            fig.add_trace(go.Scatter(x=df.index,y=df["DI_m"],name="DI-",
-                line=dict(color="#ef9a9a",width=1.2,dash="dot"),showlegend=False),row=r,col=1)
-            fig.add_hline(y=25,line_dash="dash",line_color="rgba(255,255,255,0.2)",
-                line_width=1,row=r,col=1)
-        elif key=="CCI" and "CCI" in df.columns:
-            fig.add_trace(go.Scatter(x=df.index,y=df["CCI"],name="CCI",
-                line=dict(color=color,width=1.8),showlegend=False),row=r,col=1)
-            for lv,c_ in [(100,"rgba(239,83,80,0.4)"),(0,"rgba(200,200,200,0.15)"),(-100,"rgba(38,166,154,0.4)")]:
-                fig.add_hline(y=lv,line_dash="dash",line_color=c_,line_width=1,row=r,col=1)
 
-    # ── Fix asse Y prezzo: forza range dai dati reali ──
-    fig.update_yaxes(range=[y_min,y_max],row=1,col=1)
+# ─────────────────────────────────────────────────────────────────────────────
+# ── LOG SEGNALI ───────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
 
-    ex_col=EX_CLR.get(exchange,"#fff")
-    fig.update_layout(
-        template="plotly_dark",paper_bgcolor="#0d1117",plot_bgcolor="#0d1117",
-        height=height,margin=dict(l=70,r=80,t=48,b=35),
-        hovermode="x unified",xaxis_rangeslider_visible=False,
-        title=dict(text=f'<span style="color:{ex_col};font-size:15px">● {exchange}</span>',
-            x=0.01,font=dict(size=14,color="#c9d1d9")),
-        showlegend=True,
-        legend=dict(orientation="h",yanchor="bottom",y=1.01,xanchor="left",x=0,
-            bgcolor="rgba(13,17,23,0.82)",bordercolor="#30363d",borderwidth=1,
-            font=dict(size=11),itemsizing="constant"),
+def load_log():
+    if os.path.exists(SIGNAL_LOG):
+        try: return json.load(open(SIGNAL_LOG))
+        except: pass
+    return []
+
+def save_log(logs):
+    json.dump(logs, open(SIGNAL_LOG,"w"), indent=2)
+
+def log_signal(symbol, tf, signal, entry, sl, tp1, conf, lev):
+    logs = load_log()
+    logs.append({
+        "id":       len(logs)+1,
+        "ts":       datetime.now().isoformat(),
+        "symbol":   symbol,
+        "tf":       tf,
+        "signal":   signal,
+        "entry":    round(entry,8),
+        "sl":       round(sl,8) if sl else None,
+        "tp1":      round(tp1,8) if tp1 else None,
+        "conf":     conf,
+        "leverage": lev,
+        "result":   "OPEN",
+    })
+    save_log(logs)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ── GRAFICO ───────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+
+def make_chart(df, ema_ps, overlays, oscillators, signal_res, height=820):
+    osc_rows = oscillators[:]
+    n_sub = len(osc_rows)
+    row_h = [0.52] + [round(0.48/max(n_sub,1),3)]*n_sub if n_sub else [1.0]
+    row_h_norm = [r/sum(row_h) for r in row_h]
+    titles = ["📈 Prezzo"] + [f"📊 {o}" for o in osc_rows]
+
+    fig = make_subplots(
+        rows=1+n_sub, cols=1, shared_xaxes=True,
+        vertical_spacing=0.025,
+        row_heights=row_h_norm,
+        subplot_titles=titles,
     )
-    for i in range(1,n_rows+1):
-        fig.update_xaxes(gridcolor="#1e2329",zeroline=False,
-            rangeslider_visible=False,row=i,col=1)
-        fig.update_yaxes(gridcolor="#1e2329",zeroline=False,row=i,col=1)
+
+    # ── Candele ──────────────────────────────────────────────────────────────
+    fig.add_trace(go.Candlestick(
+        x=df.index, open=df["open"], high=df["high"],
+        low=df["low"],  close=df["close"],
+        increasing_fillcolor="#00897b", increasing_line_color="#00897b",
+        decreasing_fillcolor="#c62828", decreasing_line_color="#c62828",
+        name="OHLC", showlegend=False,
+    ), row=1, col=1)
+
+    # ── Volume ───────────────────────────────────────────────────────────────
+    vol_c = ["#00897b" if df["close"].iloc[i] >= df["open"].iloc[i] else "#c62828"
+             for i in range(len(df))]
+    fig.add_trace(go.Bar(
+        x=df.index, y=df["volume"], marker_color=vol_c,
+        name="Volume", opacity=0.35, showlegend=False,
+        yaxis="y2",
+    ), row=1, col=1)
+
+    # ── EMAs ─────────────────────────────────────────────────────────────────
+    ema_colors = {5:"#26c6da",10:"#66bb6a",20:"#ffca28",50:"#ff7043",100:"#ab47bc",200:"#ef5350"}
+    for p in ema_ps:
+        col_ = f"EMA_{p}"
+        if col_ in df.columns:
+            fig.add_trace(go.Scatter(
+                x=df.index, y=df[col_], name=f"EMA{p}",
+                line=dict(color=ema_colors.get(p,"#aaa"), width=1.4),
+            ), row=1, col=1)
+
+    # ── Overlays ─────────────────────────────────────────────────────────────
+    if "BB" in overlays and "BB_up" in df.columns:
+        fig.add_trace(go.Scatter(x=df.index, y=df["BB_up"], name="BB Up",
+            line=dict(color="#78909c",width=1,dash="dot"), showlegend=False), row=1,col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df["BB_lo"], name="BB Lo",
+            line=dict(color="#78909c",width=1,dash="dot"),
+            fill="tonexty", fillcolor="rgba(120,144,156,0.07)", showlegend=False), row=1,col=1)
+
+    if "VWAP" in overlays and "VWAP" in df.columns:
+        fig.add_trace(go.Scatter(x=df.index, y=df["VWAP"], name="VWAP",
+            line=dict(color="#f48fb1", width=1.3, dash="dash")), row=1,col=1)
+
+    if "SuperTrend" in overlays and "ST_line" in df.columns:
+        bull_idx = df["ST_dir"]==1; bear_idx = df["ST_dir"]==-1
+        if bull_idx.any():
+            fig.add_trace(go.Scatter(
+                x=df.index[bull_idx], y=df["ST_line"][bull_idx],
+                name="ST Bull", line=dict(color="#00e676",width=2),
+                mode="lines"), row=1,col=1)
+        if bear_idx.any():
+            fig.add_trace(go.Scatter(
+                x=df.index[bear_idx], y=df["ST_line"][bear_idx],
+                name="ST Bear", line=dict(color="#ef5350",width=2),
+                mode="lines"), row=1,col=1)
+
+    if "S/R" in overlays:
+        levels = pivot_sr(df)
+        shown = set()
+        for kind, lvl in levels:
+            if lvl in shown: continue
+            shown.add(lvl)
+            fig.add_hline(
+                y=lvl, row=1, col=1,
+                line=dict(color="#ffd54f" if kind=="R" else "#80cbc4", width=1, dash="dot"),
+                annotation_text=kind, annotation_position="right",
+            )
+
+    # ── Frecce segnale ───────────────────────────────────────────────────────
+    sig = signal_res.get("signal","NEUTRAL")
+    if sig in ("LONG","SHORT") and signal_res.get("sl"):
+        last_x = df.index[-1]; last_y = float(df["close"].iloc[-1])
+        fig.add_trace(go.Scatter(
+            x=[last_x], y=[last_y],
+            mode="markers+text",
+            marker=dict(symbol="triangle-up" if sig=="LONG" else "triangle-down",
+                        size=16, color="#00e676" if sig=="LONG" else "#ef5350"),
+            text=[sig], textposition="top center",
+            name=sig, showlegend=False,
+        ), row=1, col=1)
+
+    # ── Oscillatori ──────────────────────────────────────────────────────────
+    for ri, osc in enumerate(osc_rows, start=2):
+        if osc == "RSI" and "RSI" in df.columns:
+            fig.add_trace(go.Scatter(x=df.index, y=df["RSI"], name="RSI",
+                line=dict(color="#ce93d8", width=1.5)), row=ri, col=1)
+            fig.add_hline(y=70, line_color="#ef5350", line_dash="dot", row=ri, col=1)
+            fig.add_hline(y=30, line_color="#00e676", line_dash="dot", row=ri, col=1)
+            fig.add_hline(y=50, line_color="#555", line_dash="dot", row=ri, col=1)
+            fig.update_yaxes(range=[0,100], row=ri, col=1)
+
+        elif osc == "MACD" and "MACD" in df.columns:
+            h_c = ["#00897b" if v>=0 else "#c62828" for v in df["MACD_hist"]]
+            fig.add_trace(go.Bar(x=df.index, y=df["MACD_hist"], marker_color=h_c,
+                name="MACD Hist", opacity=0.7), row=ri,col=1)
+            fig.add_trace(go.Scatter(x=df.index, y=df["MACD"], name="MACD",
+                line=dict(color="#64b5f6",width=1.3)), row=ri,col=1)
+            fig.add_trace(go.Scatter(x=df.index, y=df["MACD_sig"], name="Signal",
+                line=dict(color="#ef9a9a",width=1.3)), row=ri,col=1)
+
+        elif osc == "Stoch" and "STOCH_K" in df.columns:
+            fig.add_trace(go.Scatter(x=df.index, y=df["STOCH_K"], name="%K",
+                line=dict(color="#4fc3f7",width=1.3)), row=ri,col=1)
+            fig.add_trace(go.Scatter(x=df.index, y=df["STOCH_D"], name="%D",
+                line=dict(color="#f48fb1",width=1.3)), row=ri,col=1)
+            fig.add_hline(y=80, line_color="#ef5350", line_dash="dot", row=ri,col=1)
+            fig.add_hline(y=20, line_color="#00e676", line_dash="dot", row=ri,col=1)
+            fig.update_yaxes(range=[0,100], row=ri,col=1)
+
+        elif osc == "ADX" and "ADX" in df.columns:
+            fig.add_trace(go.Scatter(x=df.index, y=df["ADX"], name="ADX",
+                line=dict(color="#ffca28",width=1.5)), row=ri,col=1)
+            fig.add_trace(go.Scatter(x=df.index, y=df["DI_plus"], name="DI+",
+                line=dict(color="#00e676",width=1, dash="dot")), row=ri,col=1)
+            fig.add_trace(go.Scatter(x=df.index, y=df["DI_minus"], name="DI-",
+                line=dict(color="#ef5350",width=1, dash="dot")), row=ri,col=1)
+            fig.add_hline(y=ADX_TREND_GATE, line_color="#888", line_dash="dash", row=ri,col=1)
+
+        elif osc == "CCI" and "CCI" in df.columns:
+            cci_c = ["#00897b" if v>=0 else "#c62828" for v in df["CCI"]]
+            fig.add_trace(go.Bar(x=df.index, y=df["CCI"], marker_color=cci_c,
+                name="CCI", opacity=0.7), row=ri,col=1)
+            fig.add_hline(y=100, line_color="#ef5350", line_dash="dot", row=ri,col=1)
+            fig.add_hline(y=-100,line_color="#00e676", line_dash="dot", row=ri,col=1)
+
+    # ── Layout ────────────────────────────────────────────────────────────────
+    fig.update_layout(
+        paper_bgcolor="#0d1117", plot_bgcolor="#0d1117",
+        font=dict(color="#c9d1d9", size=11),
+        height=height,
+        legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0),
+        hovermode="x unified", xaxis_rangeslider_visible=False,
+        margin=dict(l=10,r=10,t=40,b=10),
+    )
+    for i in range(1, 2+n_sub):
+        fig.update_xaxes(gridcolor="#21262d", row=i, col=1)
+        fig.update_yaxes(gridcolor="#21262d", row=i, col=1)
+
+    # Volume axis secondaria
+    fig.update_layout(yaxis2=dict(
+        overlaying="y", side="right", showgrid=False,
+        showticklabels=False, range=[0, df["volume"].max()*5],
+    ))
     return fig
 
-# ── CALENDARIO ─────────────────────────────────────────────────────────────
 
-@st.cache_data(ttl=3600,show_spinner=False)
+# ─────────────────────────────────────────────────────────────────────────────
+# ── CALENDARIO ECONOMICO ─────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+
+@st.cache_data(ttl=3600)
 def get_calendar():
     try:
-        r=requests.get("https://nfs.faireconomy.media/ff_calendar_thisweek.json",
-            timeout=10,headers=HDR)
-        if r.status_code==200:
-            ev=[]
-            for x in r.json():
-                if not isinstance(x,dict): continue
-                try: dt=datetime.strptime(x.get("date","")[:19],"%Y-%m-%dT%H:%M:%S"); ds=dt.strftime("%Y-%m-%d"); ts=dt.strftime("%H:%M")
-                except: ds=str(datetime.now().date()); ts="00:00"
-                ev.append({"date":ds,"time":ts,"country":x.get("country",""),
-                    "event":x.get("title","N/A"),"impact":(x.get("impact") or "Low").upper(),
-                    "prev":x.get("previous") or "-","forecast":x.get("forecast") or "-",
-                    "actual":x.get("actual") or ""})
-            return ev
-    except: pass
-    today=datetime.now()
-    return [{"date":(today+timedelta(days=d)).strftime("%Y-%m-%d"),"time":"14:30",
-             "country":c,"event":n,"impact":i,"prev":p,"forecast":f,"actual":""}
-            for d,n,c,i,p,f in [(1,"Non-Farm Payrolls","🇺🇸","HIGH","175K","180K"),
-                (3,"CPI Inflation","🇺🇸","HIGH","3.2%","3.1%"),(5,"FOMC","🇺🇸","HIGH","5.25%","5.25%"),
-                (7,"ECB Rate","🇪🇺","HIGH","4.00%","4.00%"),(14,"Core PCE","🇺🇸","MEDIUM","2.7%","2.6%")]]
+        url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+        r = requests.get(url, timeout=8)
+        raw = r.json()
+        result = []
+        for e in raw:
+            dt = e.get("date","")
+            try:
+                parsed = datetime.strptime(dt, "%Y-%m-%dT%H:%M:%S%z")
+                date_s = parsed.strftime("%Y-%m-%d")
+                time_s = parsed.strftime("%H:%M")
+            except Exception:
+                date_s = datetime.now().strftime("%Y-%m-%d"); time_s = ""
+            result.append({
+                "date":     date_s, "time": time_s,
+                "country":  e.get("country",""),
+                "event":    e.get("title",""),
+                "impact":   e.get("impact","LOW").upper(),
+                "prev":     e.get("previous","—"),
+                "forecast": e.get("forecast","—"),
+                "actual":   e.get("actual",""),
+            })
+        return result
+    except Exception:
+        pass
+    # Fallback dinamico
+    today = datetime.now()
+    return [
+        {"date":(today+timedelta(days=i)).strftime("%Y-%m-%d"),"time":t,
+         "country":c,"event":ev,"impact":imp,"prev":pr,"forecast":fc,"actual":""}
+        for i,t,c,ev,imp,pr,fc in [
+            (0,"14:30","🇺🇸","CPI Inflation","HIGH","3.2%","3.1%"),
+            (1,"14:30","🇺🇸","PPI","MEDIUM","2.1%","2.0%"),
+            (2,"20:00","🇺🇸","FOMC Minutes","HIGH","—","—"),
+            (3,"10:00","🇪🇺","BCE Rate Decision","HIGH","4.50%","4.25%"),
+            (4,"14:30","🇺🇸","Non-Farm Payrolls","HIGH","175K","185K"),
+            (5,"11:00","🇪🇺","GDP Flash","MEDIUM","0.3%","0.4%"),
+            (7,"10:00","🇬🇧","BoE Rate Decision","HIGH","5.25%","5.00%"),
+            (9,"14:30","🇺🇸","Retail Sales","MEDIUM","0.4%","0.5%"),
+            (11,"14:30","🇺🇸","PCE Deflator","HIGH","2.8%","2.6%"),
+            (14,"14:30","🇺🇸","Initial Jobless Claims","MEDIUM","220K","215K"),
+        ]
+    ]
 
 
-# ── TOP 100 CRIPTO PER CAP ─────────────────────────────────────────────────
-TOP20 = [
-    "BTC","ETH","BNB","SOL","XRP","DOGE","ADA","AVAX","TRX","SHIB",
-    "DOT","LINK","MATIC","LTC","UNI","ATOM","XLM","APT","ICP","OP"
-]
-TOP80 = [
-    "ARB","FIL","HBAR","VET","INJ","IMX","MNT","GRT","STX","NEAR",
-    "AAVE","SAND","MANA","ENS","LDO","RPL","CRV","SNX","BAL","COMP",
-    "1INCH","SUSHI","YFI","MKR","DYDX","RUNE","KAVA","FTM","ONE","ZIL",
-    "QTUM","ONT","ICX","ZRX","BAT","KNC","STORJ","OGN","REN","BAND",
-    "OCEAN","FET","AGI","NMR","ANKR","COTI","CELR","SKL","CHZ","FLOW",
-    "ROSE","ALPHA","BETA","TWT","DENT","HOT","WIN","BTT","NFT","POLS",
-    "AUCTION","KEEP","NU","PERP","MDT","LINA","VITE","STMX","TROY","IRIS",
-    "DOCK","EASY","FOR","DF","BNT","TRB","REP","MLN","RSR","OXT"
-]
-TOP100 = TOP20 + TOP80
+# ─────────────────────────────────────────────────────────────────────────────
+# ── SEGNALE CARD ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
 
-# ── TRADE ZONE ANALYZER ───────────────────────────────────────────────────
-
-def analyze_trade_zone(df, coin, tf):
-    """Analisi in tempo reale: Trade Zone o No-Trade Zone"""
-    if df.empty or len(df) < 50:
-        return {"zone": "UNKNOWN", "score": 0, "reasons": [], "color": "gray"}
-
-    cl = df["close"]; hi = df["high"]; lo = df["low"]
-    reasons = []; score = 0
-
-    # 1. Trend chiarezza — EMA stack
-    e20 = ema(cl, 20).iloc[-1]; e50 = ema(cl, 50).iloc[-1]
-    e200 = ema(cl, 200).iloc[-1]; px = float(cl.iloc[-1])
-    if px > e20 > e50 > e200:
-        score += 20; reasons.append("✅ EMA stack bullish perfetto")
-    elif px < e20 < e50 < e200:
-        score += 20; reasons.append("✅ EMA stack bearish perfetto")
-    elif (px > e20 and e20 > e50) or (px < e20 and e20 < e50):
-        score += 10; reasons.append("⚠️ EMA parzialmente allineate")
+def render_signal_card(res, symbol, capital, risk_p, rr):
+    sig = res["signal"]
+    if sig == "LONG":
+        bg="#003300"; brd="#00e676"; lbl="🟢 LONG"; clr="#00e676"
+    elif sig == "SHORT":
+        bg="#330000"; brd="#ef5350"; lbl="🔴 SHORT"; clr="#ef5350"
     else:
-        score -= 10; reasons.append("❌ EMA in conflitto — range laterale")
+        bg="#1a1a1a"; brd="#555"; lbl="⚪ NEUTRAL"; clr="#aaa"
 
-    # 2. ADX — forza del trend
-    adx_s, _, _ = adx_full(df)
-    adx_v = float(adx_s.iloc[-1])
-    if adx_v >= 30:
-        score += 25; reasons.append(f"✅ ADX {adx_v:.0f} — trend forte")
-    elif adx_v >= 22:
-        score += 12; reasons.append(f"⚠️ ADX {adx_v:.0f} — trend moderato")
-    else:
-        score -= 15; reasons.append(f"❌ ADX {adx_v:.0f} — mercato laterale")
+    px = res.get("entry_px", 0)
+    fmt = f"${px:,.6f}" if px<0.01 else f"${px:,.4f}" if px<1 else f"${px:,.2f}"
 
-    # 3. SuperTrend conferma
-    _, std = supertrend(df)
-    if std.iloc[-1] == std.iloc[-3]:  # stabile, non appena invertito
-        score += 15; reasons.append("✅ SuperTrend stabile — direzionale")
-    else:
-        score -= 5; reasons.append("⚠️ SuperTrend appena invertito — attenzione")
+    # Risk sizing
+    risk_usd = capital * risk_p/100
+    sl = res.get("sl"); tp1 = res.get("tp1"); tp2 = res.get("tp2")
+    sl_d = abs(px-sl) if sl else px*0.02
+    size_usd = (risk_usd/sl_d)*px if sl_d else 0
 
-    # 4. ATR volatilità sufficiente
-    atr_v = float(atr14(df).iloc[-1])
-    atr_pct = atr_v / px * 100
-    if atr_pct >= 0.8:
-        score += 15; reasons.append(f"✅ ATR {atr_pct:.2f}% — volatilità buona")
-    elif atr_pct >= 0.4:
-        score += 5; reasons.append(f"⚠️ ATR {atr_pct:.2f}% — volatilità bassa")
-    else:
-        score -= 10; reasons.append(f"❌ ATR {atr_pct:.2f}% — mercato piatto")
+    sl_s  = f"${sl:,.5g}"  if sl  else "—"
+    tp1_s = f"${tp1:,.5g}" if tp1 else "—"
+    tp2_s = f"${tp2:,.5g}" if tp2 else "—"
 
-    # 5. RSI non in zona di esaurimento estremo
-    rv = float(rsi14(cl).iloc[-1])
-    if 35 < rv < 65:
-        score += 10; reasons.append(f"✅ RSI {rv:.0f} — zona neutrale operabile")
-    elif rv <= 20 or rv >= 80:
-        score -= 15; reasons.append(f"❌ RSI {rv:.0f} — estremo, rischio inversione")
-    else:
-        score += 5; reasons.append(f"⚠️ RSI {rv:.0f} — zona di attenzione")
-
-    # 6. Volume > media
-    vol_ma = float(df["volume"].rolling(20).mean().iloc[-1])
-    vol_cur = float(df["volume"].iloc[-1])
-    if vol_cur > vol_ma * 1.3:
-        score += 15; reasons.append("✅ Volume sopra media — partecipazione alta")
-    elif vol_cur > vol_ma * 0.8:
-        score += 5; reasons.append("⚠️ Volume nella norma")
-    else:
-        score -= 10; reasons.append("❌ Volume basso — scarsa partecipazione")
-
-    score = max(0, min(100, score))
-
-    if score >= 65:
-        zone = "TRADE ZONE"
-        color = "green"
-        emoji = "🟢"
-    elif score >= 40:
-        zone = "ZONA ATTENZIONE"
-        color = "orange"
-        emoji = "🟡"
-    else:
-        zone = "NO-TRADE ZONE"
-        color = "red"
-        emoji = "🔴"
-
-    return {"zone": zone, "score": score, "reasons": reasons,
-            "color": color, "emoji": emoji,
-            "adx": adx_v, "atr_pct": atr_pct, "rsi": rv}
-
-
-def render_trade_zone(tz):
-    """Rende il box Trade Zone sopra i segnali"""
-    clr_map = {"green": "#003300", "orange": "#332200", "red": "#330000"}
-    brd_map  = {"green": "#00e676", "orange": "#ffb300", "red": "#ef5350"}
-    txt_map  = {"green": "#00e676", "orange": "#ffb300", "red": "#ef5350"}
-    bg   = clr_map.get(tz["color"], "#1a1a1a")
-    brd  = brd_map.get(tz["color"], "#555")
-    txt  = txt_map.get(tz["color"], "#ccc")
-
-    reasons_html = "".join(
-        f'<div style="font-size:12px;color:#c9d1d9;margin:2px 0">{r}</div>'
-        for r in tz["reasons"]
-    )
     st.markdown(f"""
-    <div style="background:{bg};border:2px solid {brd};border-radius:10px;
-         padding:14px 18px;margin-bottom:14px">
+    <div style="background:{bg};border:2px solid {brd};border-radius:12px;
+         padding:14px 18px;margin:10px 0">
       <div style="display:flex;justify-content:space-between;align-items:center">
-        <span style="font-size:22px;font-weight:700;color:{txt}">
-          {tz["emoji"]} {tz["zone"]}
-        </span>
-        <span style="font-size:28px;font-weight:800;color:{txt}">
-          {tz["score"]}/100
-        </span>
+        <span style="font-size:22px;font-weight:800;color:{clr}">{lbl}</span>
+        <span style="font-size:26px;font-weight:800;color:{clr}">{res['confidence']}/100</span>
       </div>
-      <div style="margin-top:4px;font-size:12px;color:#8b949e">
-        ADX {tz["adx"]:.0f} &nbsp;|&nbsp; ATR {tz["atr_pct"]:.2f}% &nbsp;|&nbsp; RSI {tz["rsi"]:.0f}
+      <div style="color:#8b949e;font-size:12px;margin:4px 0">
+        {res.get('regime_msg','')}
       </div>
-      <div style="margin-top:10px;border-top:1px solid #30363d;padding-top:8px">
-        {reasons_html}
+      <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin-top:10px">
+        <div style="background:#0d1117;border-radius:6px;padding:6px;text-align:center">
+          <div style="color:#8b949e;font-size:9px">ENTRY</div>
+          <div style="color:#ffeb3b;font-size:11px;font-weight:700">{fmt}</div>
+        </div>
+        <div style="background:#0d1117;border-radius:6px;padding:6px;text-align:center">
+          <div style="color:#ef5350;font-size:9px">SL</div>
+          <div style="color:#ef5350;font-size:11px;font-weight:700">{sl_s}</div>
+        </div>
+        <div style="background:#0d1117;border-radius:6px;padding:6px;text-align:center">
+          <div style="color:#00e676;font-size:9px">TP1</div>
+          <div style="color:#00e676;font-size:11px;font-weight:700">{tp1_s}</div>
+        </div>
+        <div style="background:#0d1117;border-radius:6px;padding:6px;text-align:center">
+          <div style="color:#69f0ae;font-size:9px">TP2</div>
+          <div style="color:#69f0ae;font-size:11px;font-weight:700">{tp2_s}</div>
+        </div>
+        <div style="background:#0d1117;border-radius:6px;padding:6px;text-align:center">
+          <div style="color:#8b949e;font-size:9px">LEV</div>
+          <div style="color:#ffca28;font-size:11px;font-weight:700">×{res.get('leverage',1)}</div>
+        </div>
+      </div>
+      <div style="color:#8b949e;font-size:11px;margin-top:8px">
+        💰 Rischio: <b style="color:#fff">${risk_usd:.0f}</b>
+        · Size: <b style="color:#fff">${size_usd:.0f}</b>
+        · LONG {res.get('long_score',0)}/100 · SHORT {res.get('short_score',0)}/100
       </div>
     </div>
     """, unsafe_allow_html=True)
 
 
-# ── SCANNER TOP 100 ────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# ── BACKTEST ─────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
 
-@st.cache_data(ttl=120, show_spinner=False)
-def scanner_group(symbols, tf_scan="1h"):
-    results = []
-    for sym in symbols:
-        pair_b = f"{sym}USDT"
-        df_s, _ = get_ohlcv({"exchange":"Binance","symbol":sym,"pair":pair_b}, tf_scan, 150)
-        if df_s.empty or len(df_s) < 50:
-            continue
-        df_s = add_all(df_s, [20, 50])
-        cl = df_s["close"]
-        curr = float(cl.iloc[-1])
-        atr_v = float(df_s["ATR"].iloc[-1]) if "ATR" in df_s.columns else curr * 0.01
+def run_backtest(df, ema_ps, threshold, capital):
+    if len(df) < 80:
+        return None, None
+    jarvis_bt = JarvisEngine()
+    eq = [capital]; wins = 0; losses = 0; pf_w = 0; pf_l = 0
+    prev_sig = "NEUTRAL"; entry_p = None; sl_p = None; tp_p = None
 
-        sc = 0
-        e20 = float(df_s["EMA_20"].iloc[-1]); e50 = float(df_s["EMA_50"].iloc[-1])
-        if curr > e20 > e50:   sc += 20
-        elif curr < e20 < e50: sc -= 20
-        if df_s["MACD"].iloc[-1] > df_s["MACD_sig"].iloc[-1]: sc += 15
-        else: sc -= 15
-        rv = float(df_s["RSI"].iloc[-1])
-        if rv < 35:   sc += 18
-        elif rv > 65: sc -= 18
-        elif rv > 50: sc += 5
-        else:         sc -= 5
-        std = float(df_s["ST_d"].iloc[-1]) if "ST_d" in df_s.columns else 0
-        if std ==  1: sc += 20
-        elif std == -1: sc -= 20
-        adx_v = float(df_s["ADX"].iloc[-1]) if "ADX" in df_s.columns else 0
-        if adx_v > 25: sc = int(sc * 1.15)
-        if float(df_s["volume"].iloc[-1]) > float(df_s["VOLMA"].iloc[-1]) * 1.4:
-            sc = int(sc * 1.1)
+    for i in range(60, len(df)-1):
+        sub = df.iloc[:i+1].copy()
+        sub_ind = add_all_indicators(sub, ema_ps)
+        res = jarvis_bt.signal(sub_ind, ema_ps, threshold)
+        jarvis_bt.update(sub_ind, 1 if sub_ind["close"].iloc[-1]>sub_ind["close"].iloc[-2] else -1)
 
-        sc_norm = max(0, min(100, 50 + sc))
-        if sc_norm >= 65:     direction = "LONG"
-        elif sc_norm <= 35:   direction = "SHORT"
-        else: continue
-
-        sl_dist = atr_v * 1.5
-        if direction == "LONG":
-            sl  = curr - sl_dist; tp1 = curr + sl_dist * 2.0; tp2 = curr + sl_dist * 3.236
+        curr_eq = eq[-1]
+        if prev_sig != "NEUTRAL" and entry_p and sl_p and tp_p:
+            nx = float(df["close"].iloc[i+1])
+            risk = abs(entry_p-sl_p)/entry_p if entry_p else 0.02
+            pos  = curr_eq * 0.01 / risk if risk else 0
+            if prev_sig == "LONG":
+                if nx <= sl_p:
+                    pnl = -curr_eq*0.01; losses+=1; pf_l+=abs(pnl)
+                elif nx >= tp_p:
+                    pnl =  curr_eq*0.02; wins+=1;   pf_w+=pnl
+                else: pnl = 0
+            else:
+                if nx >= sl_p:
+                    pnl = -curr_eq*0.01; losses+=1; pf_l+=abs(pnl)
+                elif nx <= tp_p:
+                    pnl =  curr_eq*0.02; wins+=1;   pf_w+=pnl
+                else: pnl = 0
+            eq.append(curr_eq+pnl)
         else:
-            sl  = curr + sl_dist; tp1 = curr - sl_dist * 2.0; tp2 = curr - sl_dist * 3.236
+            eq.append(curr_eq)
 
-        chg = (curr / float(cl.iloc[-2]) - 1) * 100 if float(cl.iloc[-2]) else 0
-        results.append({"sym":sym,"direction":direction,"score":sc_norm,
-            "price":curr,"sl":sl,"tp1":tp1,"tp2":tp2,"rsi":rv,"adx":adx_v,"chg":chg})
+        if res["signal"] in ("LONG","SHORT"):
+            prev_sig = res["signal"]
+            entry_p  = res["entry_px"]
+            sl_p     = res["sl"]
+            tp_p     = res["tp1"]
+        else:
+            prev_sig = "NEUTRAL"; entry_p=sl_p=tp_p=None
 
-    results.sort(key=lambda x: abs(x["score"] - 50), reverse=True)
-    return results
-
-
-def _signal_card(s):
-    """Renderizza una card segnale"""
-    is_long = s["direction"] == "LONG"
-    clr  = "#00e676" if is_long else "#ef5350"
-    arrow = "^" if is_long else "v"
-    px = s["price"]
-    fmt = f"${px:,.6f}" if px < 0.01 else f"${px:,.4f}" if px < 1 else f"${px:,.2f}"
-    chg_col = "#00e676" if s["chg"] >= 0 else "#ef5350"
-    bg_lbl  = "#0d2e1a" if is_long else "#2e0d0d"
-
-    st.markdown(f"""
-    <div style="background:#161b22;border:1px solid #30363d;
-         border-left:4px solid {clr};border-radius:8px;
-         padding:10px 12px;margin-bottom:8px;font-size:13px">
-      <div style="display:flex;justify-content:space-between;align-items:center">
-        <span style="color:{clr};font-weight:700;font-size:15px">{arrow} {s["sym"]}/USDT</span>
-        <span style="color:{clr};background:{bg_lbl};padding:2px 9px;
-              border-radius:11px;font-weight:600;font-size:12px">
-          {"LONG" if is_long else "SHORT"} {s["score"]}/100</span>
-      </div>
-      <div style="color:#8b949e;margin:4px 0;font-size:11px">
-        <span style="color:{chg_col}">{s["chg"]:+.2f}%</span>
-        &nbsp;·&nbsp; RSI {s["rsi"]:.0f} &nbsp;·&nbsp; ADX {s["adx"]:.0f}
-      </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;
-           gap:3px;text-align:center;margin-top:6px">
-        <div style="background:#0d1117;border-radius:4px;padding:4px">
-          <div style="color:#8b949e;font-size:10px">ENTRY</div>
-          <div style="color:#ffeb3b;font-weight:600;font-size:11px">{fmt}</div>
-        </div>
-        <div style="background:#0d1117;border-radius:4px;padding:4px">
-          <div style="color:#ef5350;font-size:10px">SL</div>
-          <div style="color:#ef5350;font-weight:600;font-size:11px">${s["sl"]:,.5g}</div>
-        </div>
-        <div style="background:#0d1117;border-radius:4px;padding:4px">
-          <div style="color:#00e676;font-size:10px">TP1</div>
-          <div style="color:#00e676;font-weight:600;font-size:11px">${s["tp1"]:,.5g}</div>
-        </div>
-        <div style="background:#0d1117;border-radius:4px;padding:4px">
-          <div style="color:#69f0ae;font-size:10px">TP2</div>
-          <div style="color:#69f0ae;font-weight:600;font-size:11px">${s["tp2"]:,.5g}</div>
-        </div>
-      </div>
-    </div>""", unsafe_allow_html=True)
+    total = wins+losses
+    wr  = wins/total*100 if total else 0
+    pf  = pf_w/pf_l if pf_l else float("inf")
+    eq_s = pd.Series(eq)
+    dd   = ((eq_s - eq_s.cummax())/eq_s.cummax()*100).min()
+    ret  = (eq[-1]-capital)/capital*100
+    return {"wins":wins,"losses":losses,"wr":wr,"pf":pf,"dd":dd,"ret":ret,
+            "final":eq[-1],"trades":total}, eq
 
 
-def render_scanner_full(container, tf):
-    with container:
-        st.subheader("🔭 Scanner Top 100")
-        st.caption(f"Motore Jarvis · TF: {tf} · cache 2 min")
+# ─────────────────────────────────────────────────────────────────────────────
+# ── ACCURACY TAB ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
 
-        tab_big, tab_alt = st.tabs(["🏆 Big 20", "🚀 Alt 80"])
-
-        with tab_big:
-            col_scan_btn = st.columns([3,1])
-            with col_scan_btn[1]:
-                if st.button("🔍 Scan Big 20", key="scan_big", use_container_width=True):
-                    st.cache_data.clear()
-            with st.spinner("Scansione Big 20..."):
-                big_sigs = scanner_group(TOP20, tf)
-            longs  = [s for s in big_sigs if s["direction"]=="LONG"]
-            shorts = [s for s in big_sigs if s["direction"]=="SHORT"]
-            if not big_sigs:
-                st.info("Nessun segnale chiaro al momento.")
-            else:
-                st.markdown(f"**🟢 {len(longs)} LONG &nbsp; 🔴 {len(shorts)} SHORT**")
-                st.divider()
-                for s in big_sigs:
-                    _signal_card(s)
-
-        with tab_alt:
-            col_scan_btn2 = st.columns([3,1])
-            with col_scan_btn2[1]:
-                if st.button("🔍 Scan Alt 80", key="scan_alt", use_container_width=True):
-                    st.cache_data.clear()
-            with st.spinner("Scansione Alt 80..."):
-                alt_sigs = scanner_group(TOP80, tf)
-            longs2  = [s for s in alt_sigs if s["direction"]=="LONG"]
-            shorts2 = [s for s in alt_sigs if s["direction"]=="SHORT"]
-            if not alt_sigs:
-                st.info("Nessun segnale chiaro al momento.")
-            else:
-                st.markdown(f"**🟢 {len(longs2)} LONG &nbsp; 🔴 {len(shorts2)} SHORT**")
-                st.divider()
-                for s in alt_sigs:
-                    _signal_card(s)
+def render_accuracy_tab():
+    st.subheader("🏆 Accuracy — Storico Segnali")
+    logs = load_log()
+    if not logs:
+        st.info("Nessun segnale ancora registrato. Vai su Analisi & Segnale per generarne uno.")
+        return
+    df_l = pd.DataFrame(logs)
+    open_mask = df_l["result"]=="OPEN"
+    col1,col2,col3 = st.columns(3)
+    col1.metric("Totale", len(df_l))
+    col2.metric("OPEN",   open_mask.sum())
+    col3.metric("Chiusi", (~open_mask).sum())
+    st.divider()
+    for i, row in df_l.iloc[::-1].iterrows():
+        with st.expander(f"#{row['id']} {row['symbol']} {row['tf']} — {row['signal']} — {row['result']}"):
+            c1,c2,c3,c4 = st.columns(4)
+            c1.metric("Entry",  f"${row['entry']:.6g}")
+            c2.metric("SL",     f"${row['sl']:.6g}" if row['sl'] else "—")
+            c3.metric("TP1",    f"${row['tp1']:.6g}" if row['tp1'] else "—")
+            c4.metric("Score",  row['conf'])
+            result_opt = st.selectbox("Risultato", ["OPEN","WIN","LOSS","BE"],
+                key=f"res_{row['id']}", index=["OPEN","WIN","LOSS","BE"].index(row['result']))
+            if result_opt != row["result"]:
+                df_l.at[i,"result"] = result_opt
+                save_log(df_l.to_dict("records"))
+                st.success("Aggiornato")
 
 
-# ── MAIN ──────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# ── MAIN ─────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
 
 def main():
     st.markdown("""<style>
     [data-testid="stMetric"]{background:#161b22;border-radius:8px;
         padding:10px 14px;border:1px solid #30363d;}
     </style>""", unsafe_allow_html=True)
-    st.title("🧠 Jarvis Pro — Crypto Trading Assistant")
-    st.caption("🔵 Binance · 🟠 KuCoin · 🟣 OKX · Multi-TF · Risk Manager · Scanner Top 100")
+    st.title("🧠 Jarvis Pro — Crypto AI Trading")
+    st.caption("Binance Live · Motore V3 · ADX Gate · Kelly Sizing · Backtest Zero Bias")
 
     if "jarvis" not in st.session_state:
-        st.session_state.jarvis = Jarvis()
+        st.session_state.jarvis = JarvisEngine()
     jarvis = st.session_state.jarvis
 
-    # ── Sidebar ──────────────────────────────────────────────────────────
+    # ── SIDEBAR ──────────────────────────────────────────────────────────────
     with st.sidebar:
         st.header("⚙️ Setup")
-        with st.spinner("📡 Caricamento mercati..."):
-            coins = get_all_coins()
-        st.caption(f"✅ {len(coins)} coin disponibili")
+        with st.spinner("📡 Mercati..."):
+            coins = get_top_crypto_pairs(300)
+        st.caption(f"✅ {len(coins)} coppie USDT")
         srch = st.text_input("🔍 Cerca", "")
-        filt = [c for c in coins if srch.upper() in c["symbol"]] if srch else coins
-        sel  = st.selectbox("💎 Coin", [c["display"] for c in filt[:500]] if filt else ["—"])
-        coin = next((c for c in filt if c["display"] == sel), coins[0] if coins else None)
-        if not coin:
-            st.error("Nessun coin"); return
-        ex = coin["exchange"]
-        st.info(f"**{EX_ICONS.get(ex,'⚪')} {ex}** · `{coin['pair']}`")
-        tf_opts = TF_BIN if ex=="Binance" else list(TF_KUC.keys()) if ex=="KuCoin" else list(TF_OKX.keys())
-        tf = st.selectbox("⏱️ Timeframe", tf_opts,
-            index=tf_opts.index("1h") if "1h" in tf_opts else 0)
-        limit = st.slider("📦 Candele", 100, 500, 250, step=50)
+        filt = [c for c in coins if srch.upper() in c["coin"]] if srch else coins
+        sel  = st.selectbox("💎 Coin", [c["display"] for c in filt[:500]])
+        coin = next((c for c in filt if c["display"]==sel), coins[0])
+        symbol = coin["symbol"]
+
+        tf = st.selectbox("⏱️ Timeframe", TIMEFRAMES_BIN,
+            index=TIMEFRAMES_BIN.index("1h"))
+        limit = st.slider("📦 Candele", 100, 500, 300, step=50)
+
         st.divider()
         st.subheader("📊 Indicatori")
-        ema_s = st.multiselect("EMA",
-            ["EMA_5","EMA_10","EMA_20","EMA_50","EMA_100","EMA_200"],
+        ema_sel = st.multiselect("EMA",
+            ["EMA_20","EMA_50","EMA_100","EMA_200"],
             default=["EMA_20","EMA_50","EMA_200"])
-        eps  = [int(e.split("_")[1]) for e in ema_s] or [50]
-        ovl  = st.multiselect("Overlay",
+        ema_ps = sorted([int(e.split("_")[1]) for e in ema_sel]) or [50]
+        overlays  = st.multiselect("Overlay",
             ["BB","VWAP","SuperTrend","S/R"], default=["BB","SuperTrend","S/R"])
-        osc  = st.multiselect("Oscillatori",
-            ["RSI","MACD","Stoch","ADX","CCI"], default=["RSI","MACD"])
-        show_sig = st.checkbox("▲▼ Frecce segnali", value=True)
+        oscillators = st.multiselect("Oscillatori",
+            ["RSI","MACD","Stoch","ADX","CCI"], default=["RSI","MACD","ADX"])
+
         st.divider()
         st.subheader("💰 Risk Manager")
         capital = st.number_input("Capitale ($)", 100, 500000, 1000, step=500)
         risk_p  = st.slider("Rischio %", 0.5, 5.0, 1.0, step=0.5)
         rr_r    = st.slider("Risk:Reward", 1.0, 5.0, 2.0, step=0.5)
+
         st.divider()
-        soglia  = st.slider("🎯 Soglia AI", 40, 80, 60)
-        h_chart = st.slider("📐 Altezza grafico", 600, 1200, 820, step=50)
-        if st.button("🔄 Aggiorna", type="primary", use_container_width=True):
+        threshold = st.slider("🎯 Soglia segnale", 40, 80, 60)
+        h_chart   = st.slider("📐 Altezza grafico", 600, 1200, 850, step=50)
+
+        if st.button("🔄 Aggiorna dati", type="primary", use_container_width=True):
             st.cache_data.clear(); st.rerun()
 
-    # ── Layout: col principale | col destra ──────────────────────────────
-    col_main, col_right = st.columns([3, 1])
+    # ── TABS ─────────────────────────────────────────────────────────────────
+    tab_main, tab_bt, tab_api, tab_acc = st.tabs([
+        "📊 Analisi & Segnale",
+        "📈 Backtest",
+        "🔑 API Bitget",
+        "🏆 Accuracy",
+    ])
 
-    # ── Caricamento dati asset selezionato ───────────────────────────────
-    with st.spinner(f"📡 {coin['symbol']}..."):
-        df_raw, src = get_ohlcv(coin, tf, limit)
+    # ── DATI ─────────────────────────────────────────────────────────────────
+    with st.spinner(f"📡 {symbol} {tf}..."):
+        df_raw = get_ohlcv(symbol, tf, limit)
     if df_raw.empty:
-        st.error("❌ Nessun dato. Prova altro timeframe."); return
-    df = add_all(df_raw, eps)
-    with st.spinner("📡 HTF..."):
-        htf_sc, htf_nm = get_htf(coin, tf)
-    res  = jarvis.signal(df, eps, soglia, htf_sc)
+        st.error("❌ Nessun dato disponibile."); return
+    df = add_all_indicators(df_raw, ema_ps)
+
+    # HTF
+    htf_map = {"1m":"5m","3m":"15m","5m":"15m","15m":"1h","30m":"1h",
+               "1h":"4h","2h":"4h","4h":"1d","6h":"1d","8h":"1d",
+               "12h":"1d","1d":"1w","3d":"1w","1w":"1M","1M":"1M"}
+    htf_tf = htf_map.get(tf,"4h")
+    df_htf = get_ohlcv(symbol, htf_tf, 100)
+    htf_score = 50
+    if not df_htf.empty:
+        df_htf = add_all_indicators(df_htf, ema_ps)
+        px_h = float(df_htf["close"].iloc[-1])
+        htf_score = 60 if (px_h > float(df_htf.get("EMA_50",pd.Series([px_h])).iloc[-1])) else 40
+
+    res = jarvis.signal(df, ema_ps, threshold, htf_score)
+    res["entry_px"] = float(df["close"].iloc[-1])
+
     if len(df) > 2:
-        jarvis.update(df, 1 if df["close"].iloc[-1] > df["close"].iloc[-2] else -1)
+        jarvis.update(df, 1 if df["close"].iloc[-1]>df["close"].iloc[-2] else -1)
+    if res["signal"] != "NEUTRAL" and res.get("sl"):
+        log_signal(coin["coin"], tf, res["signal"],
+            res["entry_px"], res["sl"], res["tp1"],
+            res["confidence"], res["leverage"])
 
-    sig  = res["signal"]; sc = res["confidence"]
-    ic   = EX_ICONS.get(src, "⚪")
-    curr = float(df["close"].iloc[-1]); prev = float(df["close"].iloc[-2])
-    dpct = (curr / prev - 1) * 100 if prev else 0
-    atr_v = float(df["ATR"].iloc[-1]) if "ATR" in df.columns else curr * 0.01
-    rk   = risk_calc(curr, atr_v, capital, risk_p, sig, rr_r) if sig != "NEUTRAL" else None
+    # ─────────────────────────────────────────────────────────────────────────
+    # TAB 1 — ANALISI
+    # ─────────────────────────────────────────────────────────────────────────
+    with tab_main:
+        px = float(df["close"].iloc[-1])
+        px_p = float(df["close"].iloc[-2])
+        dpct = (px/px_p-1)*100 if px_p else 0
+        px_fmt = f"${px:,.6f}" if px<0.01 else f"${px:,.4f}" if px<1 else f"${px:,.2f}"
+        std_v = int(df["ST_dir"].iloc[-1]) if "ST_dir" in df.columns else 0
 
-    # ── Colonna principale ────────────────────────────────────────────────
-    with col_main:
-        htf_str = f"HTF {htf_sc}/100 ({htf_nm})"
-        if sig == "LONG":    st.success(f"🟢 **LONG — {sc}/100**  ·  {ic} {src}  ·  {tf}  ·  {htf_str}")
-        elif sig == "SHORT": st.error(  f"🔴 **SHORT — {sc}/100**  ·  {ic} {src}  ·  {tf}  ·  {htf_str}")
-        else:                st.warning(f"⚪ **NEUTRAL — {sc}/100**  ·  {ic} {src}  ·  {tf}  ·  {htf_str}")
+        # Metriche
+        m1,m2,m3,m4,m5,m6 = st.columns(6)
+        m1.metric("💰 Prezzo",     px_fmt, f"{dpct:+.2f}%")
+        m2.metric("📉 RSI",        f"{df['RSI'].iloc[-1]:.1f}" if "RSI" in df.columns else "—")
+        m3.metric("💪 ADX",        f"{res['adx']:.1f}")
+        m4.metric("🌊 SuperTrend", "🟢 BULL" if std_v==1 else "🔴 BEAR")
+        m5.metric("📡 HTF Score",  f"{htf_score}/100")
+        m6.metric("📐 ATR%",       f"{res['atr_pct']:.2f}%")
 
-        px_fmt = f"${curr:,.6f}" if curr<0.01 else f"${curr:,.4f}" if curr<1 else f"${curr:,.2f}"
-        c1,c2,c3,c4,c5,c6 = st.columns(6)
-        c1.metric("💰 Prezzo",   px_fmt, f"{dpct:+.2f}%")
-        c2.metric("📉 RSI",      f"{df['RSI'].iloc[-1]:.1f}" if "RSI" in df.columns else "—")
-        c3.metric("💪 ADX",      f"{df['ADX'].iloc[-1]:.1f}" if "ADX" in df.columns else "—")
-        std_v = df["ST_d"].iloc[-1] if "ST_d" in df.columns else 0
-        c4.metric("🌊 SuperTrend","🟢 BULL" if std_v==1 else "🔴 BEAR")
-        c5.metric("📡 HTF",      f"{htf_sc}/100", htf_nm)
-        c6.metric("📐 ATR",      f"{atr_v:.5g}")
+        # Card segnale
+        render_signal_card(res, coin["coin"], capital, risk_p, rr_r)
 
-        if rk and sig != "NEUTRAL":
-            st.markdown("---")
-            st.subheader(f"💰 Piano trade — {'🟢 LONG' if sig=='LONG' else '🔴 SHORT'}")
-            r1,r2,r3,r4,r5 = st.columns(5)
-            r1.metric("🎯 Entry",          f"${curr:,.5g}")
-            r2.metric("🛑 Stop Loss",      f"${rk['sl']:,.5g}",  f"-{rk['sl_pct']:.2f}%")
-            r3.metric(f"✅ TP1 (1:{rr_r:.1f})", f"${rk['tp1']:,.5g}")
-            r4.metric("🚀 TP2 (ext.)",     f"${rk['tp2']:,.5g}")
-            r5.metric("⚠️ Rischio $",      f"${rk['risk_usd']:.2f}", f"{risk_p}%")
-            sz     = f"{rk['size']:.6f}" if curr<1 else f"{rk['size']:.4f}"
-            valore = rk["size"] * curr
-            st.info(f"📦 **Size:** `{sz}` unità · **Valore:** `${valore:,.2f}` · **R:R 1:{rr_r:.1f}`")
-            st.markdown("---")
+        # Confluenze dettaglio
+        with st.expander("🧠 Confluenze LONG vs SHORT — dettaglio"):
+            dl, dr = st.columns(2)
+            with dl:
+                st.markdown(f"**🟢 LONG {res['long_score']}/100**")
+                for r in res["reasons_long"]: st.write(r)
+            with dr:
+                st.markdown(f"**🔴 SHORT {res['short_score']}/100**")
+                for r in res["reasons_short"]: st.write(r)
+            st.caption(res.get("regime_msg",""))
 
-        with st.expander("🧠 AI Score — confluenza dettagliata"):
-            ca, cb = st.columns(2)
-            ca.write(f"**LTF score:** {sc}/100")
-            ca.write(f"**HTF score ({htf_nm}):** {htf_sc}/100")
-            ca.write(f"**k-NN:** {'🟢 LONG' if res['knn']==1 else '🔴 SHORT' if res['knn']==-1 else '⚪'}")
-            for r_ in res["reasons"]: cb.write(f"• {r_}")
-
-        sigs = detect_signals(df, eps) if show_sig else []
-        fig  = make_chart(df, eps, ovl, osc, sigs, rk, sig, src, h_chart)
+        # Grafico
+        fig = make_chart(df, ema_ps, overlays, oscillators, res, h_chart)
         st.plotly_chart(fig, use_container_width=True)
-        st.caption("🖱️ Clicca legenda per attivare/disattivare · Scroll = zoom · Drag = pan")
 
-        with st.expander("📋 Tabella dati"):
-            cols_ = ["open","high","low","close","volume","RSI","MACD","ADX","SK","ATR","CCI"]
+        # Calendario economico
+        st.divider()
+        st.subheader("📅 Calendario Economico")
+        cal_col1, cal_col2, cal_col3 = st.columns([1,1,2])
+        with cal_col1:
+            sd = st.date_input("Da", datetime.now().date(), key="cal_da")
+        with cal_col2:
+            ed = st.date_input("A",  datetime.now().date()+timedelta(days=14), key="cal_a")
+        with cal_col3:
+            imp_f = st.multiselect("Impatto", ["HIGH","MEDIUM","LOW"],
+                default=["HIGH","MEDIUM"], key="cal_imp")
+
+        with st.spinner("Caricamento calendario..."):
+            ev_all = get_calendar()
+        evs = [e for e in ev_all
+               if e.get("date") and e["impact"] in imp_f
+               and sd <= datetime.strptime(e["date"],"%Y-%m-%d").date() <= ed]
+        evs.sort(key=lambda x: x["date"]+x.get("time",""))
+
+        if evs:
+            for e in evs:
+                ic = {"HIGH":"🔴","MEDIUM":"🟡","LOW":"🟢"}.get(e["impact"],"⚪")
+                act = f" → **{e['actual']}**" if e.get("actual") else ""
+                col_ev, col_data = st.columns([2,1])
+                with col_ev:
+                    st.markdown(f"{ic} **{e['event']}**{act}")
+                    st.caption(f"{e['country']} · {e['date']} {e.get('time','')}")
+                with col_data:
+                    st.caption(f"Prec: `{e['prev']}` · Prev: `{e['forecast']}`")
+                st.divider()
+        else:
+            st.info("Nessun evento nel periodo selezionato.")
+
+        # Dati grezzi
+        with st.expander("📋 Dati recenti"):
+            cols_ = ["open","high","low","close","volume","RSI","MACD","ADX","ATR","CCI"]
             st.dataframe(df.tail(30)[[c for c in cols_ if c in df.columns]].round(6),
                 use_container_width=True)
 
-    # ── Colonna destra ────────────────────────────────────────────────────
-    with col_right:
+    # ─────────────────────────────────────────────────────────────────────────
+    # TAB 2 — BACKTEST
+    # ─────────────────────────────────────────────────────────────────────────
+    with tab_bt:
+        st.subheader("📈 Backtest — Zero Look-Ahead Bias")
+        st.info(f"Warm-up 60 candele · ADX Gate >{ADX_TREND_GATE} · ATR gate >{ATR_MIN_PCT}%")
 
-        # 1. TRADE ZONE ANALYZER — asset selezionato (IN PRIMO PIANO)
-        st.subheader("🎯 Trade Zone Analyzer")
-        st.caption(f"{coin['symbol']} · {tf} · analisi live")
-        with st.spinner("Analisi in corso..."):
-            tz = analyze_trade_zone(df, coin, tf)
-        render_trade_zone(tz)
+        bt_cap = st.number_input("Capitale backtest ($)", 100, 100000, 10000, step=1000)
+        bt_thr = st.slider("Soglia segnale backtest", 40, 80, threshold)
 
+        if st.button("▶️ Esegui Backtest", type="primary", use_container_width=True):
+            with st.spinner("Calcolo in corso..."):
+                stats, equity = run_backtest(df, ema_ps, bt_thr, bt_cap)
+            if stats:
+                b1,b2,b3,b4 = st.columns(4)
+                b1.metric("Win Rate",     f"{stats['wr']:.1f}%")
+                b2.metric("Profit Factor",f"{stats['pf']:.2f}" if stats['pf']!=float('inf') else "∞")
+                b3.metric("Max DD",       f"{stats['dd']:.1f}%")
+                b4.metric("Return",       f"{stats['ret']:.1f}%",
+                    f"${stats['final']:,.0f}")
+                st.caption(f"Trade totali: {stats['trades']} · W:{stats['wins']} L:{stats['losses']}")
+
+                judge = "✅ Strategia buona" if stats["wr"]>55 and stats["pf"]>1.5 else \
+                        "⚠️ Accettabile" if stats["wr"]>45 else "❌ Reworking necessario"
+                st.markdown(f"**{judge}**")
+
+                eq_df = pd.DataFrame({"Equity": equity})
+                fig_bt = go.Figure(go.Scatter(y=eq_df["Equity"], mode="lines",
+                    line=dict(color="#00e676",width=2), fill="tozeroy",
+                    fillcolor="rgba(0,230,118,0.07)"))
+                fig_bt.update_layout(
+                    paper_bgcolor="#0d1117", plot_bgcolor="#0d1117",
+                    font=dict(color="#c9d1d9"), height=350,
+                    title="Equity Curve", xaxis_title="Trade #",
+                    yaxis_title="Equity ($)",
+                    margin=dict(l=10,r=10,t=40,b=10),
+                )
+                st.plotly_chart(fig_bt, use_container_width=True)
+            else:
+                st.warning("Dati insufficienti per il backtest (min 80 candele).")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # TAB 3 — API BITGET
+    # ─────────────────────────────────────────────────────────────────────────
+    with tab_api:
+        render_bitget_settings()
+
+        # ── Piazza ordine rapido ─────────────────────────────────────────────
         st.divider()
+        st.subheader("⚡ Piazza ordine rapido")
 
-        # 2. SCANNER TOP 100 — sotto la trade zone
-        render_scanner_full(st.container(), tf)
+        if res["signal"] in ("LONG","SHORT") and res.get("sl"):
+            st.markdown(f"Segnale attivo: **{res['signal']}** su `{symbol}` — Entry `{res['entry_px']:.6g}`")
+            cfg_now = load_bitget_cfg()
+            mode_txt = "🧪 DEMO" if cfg_now.get("sandbox") else "🔴 LIVE"
+            st.warning(f"Modalità: {mode_txt}")
 
-        st.divider()
+            with st.form("order_form"):
+                oc1, oc2 = st.columns(2)
+                with oc1:
+                    order_size = st.number_input(
+                        "Dimensione ordine (USDT)",
+                        min_value=5.0, max_value=float(capital),
+                        value=float(min(capital*0.05, 100)), step=5.0
+                    )
+                with oc2:
+                    order_lev = st.number_input(
+                        "Leva", min_value=1, max_value=20,
+                        value=int(res.get("leverage",3))
+                    )
 
-        # 3. CALENDARIO ECONOMICO — in fondo
-        st.subheader("📅 Calendario Economico")
-        with st.spinner("..."): ev_all = get_calendar()
-        sd  = st.date_input("Da", datetime.now().date())
-        ed  = st.date_input("A",  datetime.now().date() + timedelta(days=14))
-        imp_f = st.multiselect("Impatto", ["HIGH","MEDIUM","LOW"], default=["HIGH","MEDIUM"])
-        evs = sorted([e for e in ev_all
-                      if imp_f and e.get("date")
-                      and sd <= datetime.strptime(e["date"],"%Y-%m-%d").date() <= ed
-                      and e["impact"] in imp_f],
-                     key=lambda x: x["date"] + x.get("time",""))
-        for e in evs:
-            ic2 = {"HIGH":"🔴","MEDIUM":"🟡","LOW":"🟢"}.get(e["impact"],"⚪")
-            act = f" → **{e['actual']}**" if e.get("actual") else ""
-            st.markdown(f"{ic2} **{e['event']}**{act}")
-            st.caption(f"{e['country']} · {e['date']} {e.get('time','')}")
-            st.caption(f"Prec:`{e['prev']}` · Prev:`{e['forecast']}`")
-            st.divider()
-        if not evs: st.info("Nessun evento")
+                auto_sl  = st.number_input("Stop Loss ($)", value=round(res["sl"],6))
+                auto_tp  = st.number_input("Take Profit ($)", value=round(res["tp1"],6))
+
+                if st.form_submit_button(f"🚀 Invia ordine {res['signal']}", type="primary"):
+                    if not cfg_now.get("api_key"):
+                        st.error("❌ Configura prima le chiavi API nel tab 🔑 API Bitget")
+                    else:
+                        with st.spinner("Invio ordine..."):
+                            r = bitget_place_order(
+                                cfg_now, coin["coin"], res["signal"],
+                                order_size/res["entry_px"],
+                                auto_sl, auto_tp, order_lev
+                            )
+                        if r.get("code") == "00000":
+                            st.success(f"✅ Ordine inviato! ID: {r.get('data',{}).get('orderId','—')}")
+                        else:
+                            st.error(f"❌ Errore: {r.get('msg', str(r))}")
+        else:
+            st.info("Nessun segnale attivo. Attendi un segnale LONG/SHORT per piazzare un ordine.")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # TAB 4 — ACCURACY
+    # ─────────────────────────────────────────────────────────────────────────
+    with tab_acc:
+        render_accuracy_tab()
+
 
 main()
