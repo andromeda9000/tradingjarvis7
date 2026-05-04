@@ -549,17 +549,151 @@ def get_calendar():
                 (7,"ECB Rate","🇪🇺","HIGH","4.00%","4.00%"),(14,"Core PCE","🇺🇸","MEDIUM","2.7%","2.6%")]]
 
 
-# ── TOP 25 CRIPTO PER CAP ──────────────────────────────────────────────────
-TOP25 = [
+# ── TOP 100 CRIPTO PER CAP ─────────────────────────────────────────────────
+TOP20 = [
     "BTC","ETH","BNB","SOL","XRP","DOGE","ADA","AVAX","TRX","SHIB",
-    "DOT","LINK","MATIC","LTC","UNI","ATOM","XLM","APT","ICP","OP",
-    "ARB","FIL","HBAR","VET","INJ"
+    "DOT","LINK","MATIC","LTC","UNI","ATOM","XLM","APT","ICP","OP"
 ]
+TOP80 = [
+    "ARB","FIL","HBAR","VET","INJ","IMX","MNT","GRT","STX","NEAR",
+    "AAVE","SAND","MANA","ENS","LDO","RPL","CRV","SNX","BAL","COMP",
+    "1INCH","SUSHI","YFI","MKR","DYDX","RUNE","KAVA","FTM","ONE","ZIL",
+    "QTUM","ONT","ICX","ZRX","BAT","KNC","STORJ","OGN","REN","BAND",
+    "OCEAN","FET","AGI","NMR","ANKR","COTI","CELR","SKL","CHZ","FLOW",
+    "ROSE","ALPHA","BETA","TWT","DENT","HOT","WIN","BTT","NFT","POLS",
+    "AUCTION","KEEP","NU","PERP","MDT","LINA","VITE","STMX","TROY","IRIS",
+    "DOCK","EASY","FOR","DF","BNT","TRB","REP","MLN","RSR","OXT"
+]
+TOP100 = TOP20 + TOP80
+
+# ── TRADE ZONE ANALYZER ───────────────────────────────────────────────────
+
+def analyze_trade_zone(df, coin, tf):
+    """Analisi in tempo reale: Trade Zone o No-Trade Zone"""
+    if df.empty or len(df) < 50:
+        return {"zone": "UNKNOWN", "score": 0, "reasons": [], "color": "gray"}
+
+    cl = df["close"]; hi = df["high"]; lo = df["low"]
+    reasons = []; score = 0
+
+    # 1. Trend chiarezza — EMA stack
+    e20 = ema(cl, 20).iloc[-1]; e50 = ema(cl, 50).iloc[-1]
+    e200 = ema(cl, 200).iloc[-1]; px = float(cl.iloc[-1])
+    if px > e20 > e50 > e200:
+        score += 20; reasons.append("✅ EMA stack bullish perfetto")
+    elif px < e20 < e50 < e200:
+        score += 20; reasons.append("✅ EMA stack bearish perfetto")
+    elif (px > e20 and e20 > e50) or (px < e20 and e20 < e50):
+        score += 10; reasons.append("⚠️ EMA parzialmente allineate")
+    else:
+        score -= 10; reasons.append("❌ EMA in conflitto — range laterale")
+
+    # 2. ADX — forza del trend
+    adx_s, _, _ = adx_full(df)
+    adx_v = float(adx_s.iloc[-1])
+    if adx_v >= 30:
+        score += 25; reasons.append(f"✅ ADX {adx_v:.0f} — trend forte")
+    elif adx_v >= 22:
+        score += 12; reasons.append(f"⚠️ ADX {adx_v:.0f} — trend moderato")
+    else:
+        score -= 15; reasons.append(f"❌ ADX {adx_v:.0f} — mercato laterale")
+
+    # 3. SuperTrend conferma
+    _, std = supertrend(df)
+    if std.iloc[-1] == std.iloc[-3]:  # stabile, non appena invertito
+        score += 15; reasons.append("✅ SuperTrend stabile — direzionale")
+    else:
+        score -= 5; reasons.append("⚠️ SuperTrend appena invertito — attenzione")
+
+    # 4. ATR volatilità sufficiente
+    atr_v = float(atr14(df).iloc[-1])
+    atr_pct = atr_v / px * 100
+    if atr_pct >= 0.8:
+        score += 15; reasons.append(f"✅ ATR {atr_pct:.2f}% — volatilità buona")
+    elif atr_pct >= 0.4:
+        score += 5; reasons.append(f"⚠️ ATR {atr_pct:.2f}% — volatilità bassa")
+    else:
+        score -= 10; reasons.append(f"❌ ATR {atr_pct:.2f}% — mercato piatto")
+
+    # 5. RSI non in zona di esaurimento estremo
+    rv = float(rsi14(cl).iloc[-1])
+    if 35 < rv < 65:
+        score += 10; reasons.append(f"✅ RSI {rv:.0f} — zona neutrale operabile")
+    elif rv <= 20 or rv >= 80:
+        score -= 15; reasons.append(f"❌ RSI {rv:.0f} — estremo, rischio inversione")
+    else:
+        score += 5; reasons.append(f"⚠️ RSI {rv:.0f} — zona di attenzione")
+
+    # 6. Volume > media
+    vol_ma = float(df["volume"].rolling(20).mean().iloc[-1])
+    vol_cur = float(df["volume"].iloc[-1])
+    if vol_cur > vol_ma * 1.3:
+        score += 15; reasons.append("✅ Volume sopra media — partecipazione alta")
+    elif vol_cur > vol_ma * 0.8:
+        score += 5; reasons.append("⚠️ Volume nella norma")
+    else:
+        score -= 10; reasons.append("❌ Volume basso — scarsa partecipazione")
+
+    score = max(0, min(100, score))
+
+    if score >= 65:
+        zone = "TRADE ZONE"
+        color = "green"
+        emoji = "🟢"
+    elif score >= 40:
+        zone = "ZONA ATTENZIONE"
+        color = "orange"
+        emoji = "🟡"
+    else:
+        zone = "NO-TRADE ZONE"
+        color = "red"
+        emoji = "🔴"
+
+    return {"zone": zone, "score": score, "reasons": reasons,
+            "color": color, "emoji": emoji,
+            "adx": adx_v, "atr_pct": atr_pct, "rsi": rv}
+
+
+def render_trade_zone(tz):
+    """Rende il box Trade Zone sopra i segnali"""
+    clr_map = {"green": "#003300", "orange": "#332200", "red": "#330000"}
+    brd_map  = {"green": "#00e676", "orange": "#ffb300", "red": "#ef5350"}
+    txt_map  = {"green": "#00e676", "orange": "#ffb300", "red": "#ef5350"}
+    bg   = clr_map.get(tz["color"], "#1a1a1a")
+    brd  = brd_map.get(tz["color"], "#555")
+    txt  = txt_map.get(tz["color"], "#ccc")
+
+    reasons_html = "".join(
+        f'<div style="font-size:12px;color:#c9d1d9;margin:2px 0">{r}</div>'
+        for r in tz["reasons"]
+    )
+    st.markdown(f"""
+    <div style="background:{bg};border:2px solid {brd};border-radius:10px;
+         padding:14px 18px;margin-bottom:14px">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <span style="font-size:22px;font-weight:700;color:{txt}">
+          {tz["emoji"]} {tz["zone"]}
+        </span>
+        <span style="font-size:28px;font-weight:800;color:{txt}">
+          {tz["score"]}/100
+        </span>
+      </div>
+      <div style="margin-top:4px;font-size:12px;color:#8b949e">
+        ADX {tz["adx"]:.0f} &nbsp;|&nbsp; ATR {tz["atr_pct"]:.2f}% &nbsp;|&nbsp; RSI {tz["rsi"]:.0f}
+      </div>
+      <div style="margin-top:10px;border-top:1px solid #30363d;padding-top:8px">
+        {reasons_html}
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+# ── SCANNER TOP 100 ────────────────────────────────────────────────────────
 
 @st.cache_data(ttl=120, show_spinner=False)
-def scanner_top25(tf_scan="1h"):
+def scanner_group(symbols, tf_scan="1h"):
     results = []
-    for sym in TOP25:
+    for sym in symbols:
         pair_b = f"{sym}USDT"
         df_s, _ = get_ohlcv({"exchange":"Binance","symbol":sym,"pair":pair_b}, tf_scan, 150)
         if df_s.empty or len(df_s) < 50:
@@ -569,260 +703,291 @@ def scanner_top25(tf_scan="1h"):
         curr = float(cl.iloc[-1])
         atr_v = float(df_s["ATR"].iloc[-1]) if "ATR" in df_s.columns else curr * 0.01
 
-        # ── Jarvis score semplificato per scanner ──
         sc = 0
-        # EMA stack
         e20 = float(df_s["EMA_20"].iloc[-1]); e50 = float(df_s["EMA_50"].iloc[-1])
-        if curr > e20 > e50: sc += 20
+        if curr > e20 > e50:   sc += 20
         elif curr < e20 < e50: sc -= 20
-        # MACD
         if df_s["MACD"].iloc[-1] > df_s["MACD_sig"].iloc[-1]: sc += 15
         else: sc -= 15
-        # RSI
         rv = float(df_s["RSI"].iloc[-1])
-        if rv < 35: sc += 18
+        if rv < 35:   sc += 18
         elif rv > 65: sc -= 18
         elif rv > 50: sc += 5
-        else: sc -= 5
-        # SuperTrend
+        else:         sc -= 5
         std = float(df_s["ST_d"].iloc[-1]) if "ST_d" in df_s.columns else 0
-        if std == 1: sc += 20
+        if std ==  1: sc += 20
         elif std == -1: sc -= 20
-        # ADX forza
         adx_v = float(df_s["ADX"].iloc[-1]) if "ADX" in df_s.columns else 0
         if adx_v > 25: sc = int(sc * 1.15)
-        # Volume spike
-        if float(df_s["volume"].iloc[-1]) > float(df_s["VOLMA"].iloc[-1]) * 1.4: sc = int(sc * 1.1)
+        if float(df_s["volume"].iloc[-1]) > float(df_s["VOLMA"].iloc[-1]) * 1.4:
+            sc = int(sc * 1.1)
 
-        # Normalizza in 0-100
         sc_norm = max(0, min(100, 50 + sc))
-
-        # Segnale solo se deciso
-        if sc_norm >= 65:
-            direction = "LONG"
-        elif sc_norm <= 35:
-            direction = "SHORT"
-        else:
-            continue  # skip NEUTRAL
+        if sc_norm >= 65:     direction = "LONG"
+        elif sc_norm <= 35:   direction = "SHORT"
+        else: continue
 
         sl_dist = atr_v * 1.5
         if direction == "LONG":
-            sl   = curr - sl_dist
-            tp1  = curr + sl_dist * 2.0
-            tp2  = curr + sl_dist * 3.236
+            sl  = curr - sl_dist; tp1 = curr + sl_dist * 2.0; tp2 = curr + sl_dist * 3.236
         else:
-            sl   = curr + sl_dist
-            tp1  = curr - sl_dist * 2.0
-            tp2  = curr - sl_dist * 3.236
+            sl  = curr + sl_dist; tp1 = curr - sl_dist * 2.0; tp2 = curr - sl_dist * 3.236
 
         chg = (curr / float(cl.iloc[-2]) - 1) * 100 if float(cl.iloc[-2]) else 0
-
-        results.append({
-            "sym": sym, "direction": direction, "score": sc_norm,
-            "price": curr, "sl": sl, "tp1": tp1, "tp2": tp2,
-            "rsi": rv, "adx": adx_v, "chg": chg,
-        })
+        results.append({"sym":sym,"direction":direction,"score":sc_norm,
+            "price":curr,"sl":sl,"tp1":tp1,"tp2":tp2,"rsi":rv,"adx":adx_v,"chg":chg})
 
     results.sort(key=lambda x: abs(x["score"] - 50), reverse=True)
     return results
 
 
-def render_scanner(col_widget, tf_scan):
-    with col_widget:
-        st.subheader("🔭 Scanner Top 25")
-        st.caption(f"Segnali Jarvis · TF: {tf_scan} · aggiorna ogni 2 min")
+def _signal_card(s):
+    """Renderizza una card segnale"""
+    is_long = s["direction"] == "LONG"
+    clr  = "#00e676" if is_long else "#ef5350"
+    arrow = "^" if is_long else "v"
+    px = s["price"]
+    fmt = f"${px:,.6f}" if px < 0.01 else f"${px:,.4f}" if px < 1 else f"${px:,.2f}"
+    chg_col = "#00e676" if s["chg"] >= 0 else "#ef5350"
+    bg_lbl  = "#0d2e1a" if is_long else "#2e0d0d"
 
-        if st.button("🔍 Scansiona ora", key="scan_btn", use_container_width=True):
-            st.cache_data.clear()
+    st.markdown(f"""
+    <div style="background:#161b22;border:1px solid #30363d;
+         border-left:4px solid {clr};border-radius:8px;
+         padding:10px 12px;margin-bottom:8px;font-size:13px">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <span style="color:{clr};font-weight:700;font-size:15px">{arrow} {s["sym"]}/USDT</span>
+        <span style="color:{clr};background:{bg_lbl};padding:2px 9px;
+              border-radius:11px;font-weight:600;font-size:12px">
+          {"LONG" if is_long else "SHORT"} {s["score"]}/100</span>
+      </div>
+      <div style="color:#8b949e;margin:4px 0;font-size:11px">
+        <span style="color:{chg_col}">{s["chg"]:+.2f}%</span>
+        &nbsp;·&nbsp; RSI {s["rsi"]:.0f} &nbsp;·&nbsp; ADX {s["adx"]:.0f}
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;
+           gap:3px;text-align:center;margin-top:6px">
+        <div style="background:#0d1117;border-radius:4px;padding:4px">
+          <div style="color:#8b949e;font-size:10px">ENTRY</div>
+          <div style="color:#ffeb3b;font-weight:600;font-size:11px">{fmt}</div>
+        </div>
+        <div style="background:#0d1117;border-radius:4px;padding:4px">
+          <div style="color:#ef5350;font-size:10px">SL</div>
+          <div style="color:#ef5350;font-weight:600;font-size:11px">${s["sl"]:,.5g}</div>
+        </div>
+        <div style="background:#0d1117;border-radius:4px;padding:4px">
+          <div style="color:#00e676;font-size:10px">TP1</div>
+          <div style="color:#00e676;font-weight:600;font-size:11px">${s["tp1"]:,.5g}</div>
+        </div>
+        <div style="background:#0d1117;border-radius:4px;padding:4px">
+          <div style="color:#69f0ae;font-size:10px">TP2</div>
+          <div style="color:#69f0ae;font-weight:600;font-size:11px">${s["tp2"]:,.5g}</div>
+        </div>
+      </div>
+    </div>""", unsafe_allow_html=True)
 
-        with st.spinner("📡 Scansione in corso..."):
-            sigs = scanner_top25(tf_scan)
 
-        if not sigs:
-            st.info("Nessun segnale chiaro al momento.")
-            return
+def render_scanner_full(container, tf):
+    with container:
+        st.subheader("🔭 Scanner Top 100")
+        st.caption(f"Motore Jarvis · TF: {tf} · cache 2 min")
 
-        longs  = [s for s in sigs if s["direction"] == "LONG"]
-        shorts = [s for s in sigs if s["direction"] == "SHORT"]
-        st.markdown(f"**🟢 {len(longs)} LONG  ·  🔴 {len(shorts)} SHORT**")
-        st.divider()
+        tab_big, tab_alt = st.tabs(["🏆 Big 20", "🚀 Alt 80"])
 
-        for s in sigs:
-            is_long = s["direction"] == "LONG"
-            clr     = "#00e676" if is_long else "#ef5350"
-            arrow   = "▲" if is_long else "▼"
-            px      = s["price"]
-            fmt     = f"${px:,.6f}" if px < 0.01 else f"${px:,.4f}" if px < 1 else f"${px:,.2f}"
-            sl_fmt  = f"${s['sl']:,.5g}"
-            tp1_fmt = f"${s['tp1']:,.5g}"
-            tp2_fmt = f"${s['tp2']:,.5g}"
-            chg_col = "🟢" if s["chg"] >= 0 else "🔴"
+        with tab_big:
+            col_scan_btn = st.columns([3,1])
+            with col_scan_btn[1]:
+                if st.button("🔍 Scan Big 20", key="scan_big", use_container_width=True):
+                    st.cache_data.clear()
+            with st.spinner("Scansione Big 20..."):
+                big_sigs = scanner_group(TOP20, tf)
+            longs  = [s for s in big_sigs if s["direction"]=="LONG"]
+            shorts = [s for s in big_sigs if s["direction"]=="SHORT"]
+            if not big_sigs:
+                st.info("Nessun segnale chiaro al momento.")
+            else:
+                st.markdown(f"**🟢 {len(longs)} LONG &nbsp; 🔴 {len(shorts)} SHORT**")
+                st.divider()
+                for s in big_sigs:
+                    _signal_card(s)
 
-            st.markdown(
-                f"""<div style="background:#161b22;border:1px solid #30363d;
-                border-left:4px solid {clr};border-radius:8px;
-                padding:10px 12px;margin-bottom:10px;font-size:13px;">
-                <div style="display:flex;justify-content:space-between;align-items:center">
-                  <span style="color:{clr};font-weight:700;font-size:16px">{arrow} {s['sym']}/USDT</span>
-                  <span style="color:{clr};background:{'#0d2e1a' if is_long else '#2e0d0d'};
-                        padding:2px 10px;border-radius:12px;font-weight:600">
-                        {'LONG' if is_long else 'SHORT'} · {s['score']}/100</span>
-                </div>
-                <div style="margin-top:6px;color:#8b949e">
-                  {chg_col} {s['chg']:+.2f}% · RSI {s['rsi']:.0f} · ADX {s['adx']:.0f}
-                </div>
-                <div style="margin-top:8px;display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:4px;text-align:center">
-                  <div style="background:#0d1117;border-radius:5px;padding:5px">
-                    <div style="color:#8b949e;font-size:10px">ENTRY</div>
-                    <div style="color:#c9d1d9;font-weight:600">{fmt}</div>
-                  </div>
-                  <div style="background:#0d1117;border-radius:5px;padding:5px">
-                    <div style="color:#ef5350;font-size:10px">STOP LOSS</div>
-                    <div style="color:#ef5350;font-weight:600">{sl_fmt}</div>
-                  </div>
-                  <div style="background:#0d1117;border-radius:5px;padding:5px">
-                    <div style="color:#00e676;font-size:10px">TP1</div>
-                    <div style="color:#00e676;font-weight:600">{tp1_fmt}</div>
-                  </div>
-                  <div style="background:#0d1117;border-radius:5px;padding:5px">
-                    <div style="color:#69f0ae;font-size:10px">TP2</div>
-                    <div style="color:#69f0ae;font-weight:600">{tp2_fmt}</div>
-                  </div>
-                </div>
-                </div>""",
-                unsafe_allow_html=True
-            )
+        with tab_alt:
+            col_scan_btn2 = st.columns([3,1])
+            with col_scan_btn2[1]:
+                if st.button("🔍 Scan Alt 80", key="scan_alt", use_container_width=True):
+                    st.cache_data.clear()
+            with st.spinner("Scansione Alt 80..."):
+                alt_sigs = scanner_group(TOP80, tf)
+            longs2  = [s for s in alt_sigs if s["direction"]=="LONG"]
+            shorts2 = [s for s in alt_sigs if s["direction"]=="SHORT"]
+            if not alt_sigs:
+                st.info("Nessun segnale chiaro al momento.")
+            else:
+                st.markdown(f"**🟢 {len(longs2)} LONG &nbsp; 🔴 {len(shorts2)} SHORT**")
+                st.divider()
+                for s in alt_sigs:
+                    _signal_card(s)
 
-# ── MAIN ───────────────────────────────────────────────────────────────────
+
+# ── MAIN ──────────────────────────────────────────────────────────────────
 
 def main():
     st.markdown("""<style>
-    [data-testid="stMetric"]{background:#161b22;border-radius:8px;padding:10px 14px;border:1px solid #30363d;}
-    </style>""",unsafe_allow_html=True)
+    [data-testid="stMetric"]{background:#161b22;border-radius:8px;
+        padding:10px 14px;border:1px solid #30363d;}
+    </style>""", unsafe_allow_html=True)
     st.title("🧠 Jarvis Pro — Crypto Trading Assistant")
-    st.caption("🔵 Binance · 🟠 KuCoin · 🟣 OKX · Multi-TF · Risk Manager · S/R · Segnali automatici")
+    st.caption("🔵 Binance · 🟠 KuCoin · 🟣 OKX · Multi-TF · Risk Manager · Scanner Top 100")
 
-    if "jarvis" not in st.session_state: st.session_state.jarvis=Jarvis()
-    jarvis=st.session_state.jarvis
+    if "jarvis" not in st.session_state:
+        st.session_state.jarvis = Jarvis()
+    jarvis = st.session_state.jarvis
 
+    # ── Sidebar ──────────────────────────────────────────────────────────
     with st.sidebar:
         st.header("⚙️ Setup")
-        with st.spinner("📡 Caricamento mercati..."): coins=get_all_coins()
+        with st.spinner("📡 Caricamento mercati..."):
+            coins = get_all_coins()
         st.caption(f"✅ {len(coins)} coin disponibili")
-        srch=st.text_input("🔍 Cerca","")
-        filt=[c for c in coins if srch.upper() in c["symbol"]] if srch else coins
-        sel=st.selectbox("💎 Coin",[c["display"] for c in filt[:500]] if filt else ["—"])
-        coin=next((c for c in filt if c["display"]==sel),coins[0] if coins else None)
-        if not coin: st.error("Nessun coin"); return
-        ex=coin["exchange"]
+        srch = st.text_input("🔍 Cerca", "")
+        filt = [c for c in coins if srch.upper() in c["symbol"]] if srch else coins
+        sel  = st.selectbox("💎 Coin", [c["display"] for c in filt[:500]] if filt else ["—"])
+        coin = next((c for c in filt if c["display"] == sel), coins[0] if coins else None)
+        if not coin:
+            st.error("Nessun coin"); return
+        ex = coin["exchange"]
         st.info(f"**{EX_ICONS.get(ex,'⚪')} {ex}** · `{coin['pair']}`")
-        tf_opts=TF_BIN if ex=="Binance" else list(TF_KUC.keys()) if ex=="KuCoin" else list(TF_OKX.keys())
-        tf=st.selectbox("⏱️ Timeframe",tf_opts,index=tf_opts.index("1h") if "1h" in tf_opts else 0)
-        limit=st.slider("📦 Candele",100,500,250,step=50)
+        tf_opts = TF_BIN if ex=="Binance" else list(TF_KUC.keys()) if ex=="KuCoin" else list(TF_OKX.keys())
+        tf = st.selectbox("⏱️ Timeframe", tf_opts,
+            index=tf_opts.index("1h") if "1h" in tf_opts else 0)
+        limit = st.slider("📦 Candele", 100, 500, 250, step=50)
         st.divider()
         st.subheader("📊 Indicatori")
-        ema_s=st.multiselect("EMA",["EMA_5","EMA_10","EMA_20","EMA_50","EMA_100","EMA_200"],
+        ema_s = st.multiselect("EMA",
+            ["EMA_5","EMA_10","EMA_20","EMA_50","EMA_100","EMA_200"],
             default=["EMA_20","EMA_50","EMA_200"])
-        eps=[int(e.split("_")[1]) for e in ema_s] or [50]
-        ovl=st.multiselect("Overlay sul grafico",["BB","VWAP","SuperTrend","S/R"],
-            default=["BB","SuperTrend","S/R"])
-        osc=st.multiselect("Oscillatori (subplot sotto)",
-            ["RSI","MACD","Stoch","ADX","CCI"],default=["RSI","MACD"])
-        show_sig=st.checkbox("▲▼ Frecce segnali",value=True)
+        eps  = [int(e.split("_")[1]) for e in ema_s] or [50]
+        ovl  = st.multiselect("Overlay",
+            ["BB","VWAP","SuperTrend","S/R"], default=["BB","SuperTrend","S/R"])
+        osc  = st.multiselect("Oscillatori",
+            ["RSI","MACD","Stoch","ADX","CCI"], default=["RSI","MACD"])
+        show_sig = st.checkbox("▲▼ Frecce segnali", value=True)
         st.divider()
         st.subheader("💰 Risk Manager")
-        capital=st.number_input("Capitale ($)",100,500000,1000,step=500)
-        risk_p=st.slider("Rischio %",0.5,5.0,1.0,step=0.5)
-        rr_r=st.slider("Risk:Reward",1.0,5.0,2.0,step=0.5)
+        capital = st.number_input("Capitale ($)", 100, 500000, 1000, step=500)
+        risk_p  = st.slider("Rischio %", 0.5, 5.0, 1.0, step=0.5)
+        rr_r    = st.slider("Risk:Reward", 1.0, 5.0, 2.0, step=0.5)
         st.divider()
-        soglia=st.slider("🎯 Soglia AI",40,80,60)
-        h_chart=st.slider("📐 Altezza grafico",600,1200,820,step=50)
-        if st.button("🔄 Aggiorna",type="primary",use_container_width=True):
+        soglia  = st.slider("🎯 Soglia AI", 40, 80, 60)
+        h_chart = st.slider("📐 Altezza grafico", 600, 1200, 820, step=50)
+        if st.button("🔄 Aggiorna", type="primary", use_container_width=True):
             st.cache_data.clear(); st.rerun()
 
-    col_main,col_cal=st.columns([3,1])
+    # ── Layout: col principale | col destra ──────────────────────────────
+    col_main, col_right = st.columns([3, 1])
+
+    # ── Caricamento dati asset selezionato ───────────────────────────────
+    with st.spinner(f"📡 {coin['symbol']}..."):
+        df_raw, src = get_ohlcv(coin, tf, limit)
+    if df_raw.empty:
+        st.error("❌ Nessun dato. Prova altro timeframe."); return
+    df = add_all(df_raw, eps)
+    with st.spinner("📡 HTF..."):
+        htf_sc, htf_nm = get_htf(coin, tf)
+    res  = jarvis.signal(df, eps, soglia, htf_sc)
+    if len(df) > 2:
+        jarvis.update(df, 1 if df["close"].iloc[-1] > df["close"].iloc[-2] else -1)
+
+    sig  = res["signal"]; sc = res["confidence"]
+    ic   = EX_ICONS.get(src, "⚪")
+    curr = float(df["close"].iloc[-1]); prev = float(df["close"].iloc[-2])
+    dpct = (curr / prev - 1) * 100 if prev else 0
+    atr_v = float(df["ATR"].iloc[-1]) if "ATR" in df.columns else curr * 0.01
+    rk   = risk_calc(curr, atr_v, capital, risk_p, sig, rr_r) if sig != "NEUTRAL" else None
+
+    # ── Colonna principale ────────────────────────────────────────────────
     with col_main:
-        with st.spinner(f"📡 {coin['symbol']}..."): df_raw,src=get_ohlcv(coin,tf,limit)
-        if df_raw.empty: st.error("❌ Nessun dato. Prova altro timeframe."); return
-        df=add_all(df_raw,eps)
-        with st.spinner("📡 HTF..."): htf_sc,htf_nm=get_htf(coin,tf)
-        res=jarvis.signal(df,eps,soglia,htf_sc)
-        if len(df)>2: jarvis.update(df,1 if df["close"].iloc[-1]>df["close"].iloc[-2] else -1)
+        htf_str = f"HTF {htf_sc}/100 ({htf_nm})"
+        if sig == "LONG":    st.success(f"🟢 **LONG — {sc}/100**  ·  {ic} {src}  ·  {tf}  ·  {htf_str}")
+        elif sig == "SHORT": st.error(  f"🔴 **SHORT — {sc}/100**  ·  {ic} {src}  ·  {tf}  ·  {htf_str}")
+        else:                st.warning(f"⚪ **NEUTRAL — {sc}/100**  ·  {ic} {src}  ·  {tf}  ·  {htf_str}")
 
-        sig=res["signal"]; sc=res["confidence"]; ic=EX_ICONS.get(src,"⚪")
-        curr=float(df["close"].iloc[-1]); prev=float(df["close"].iloc[-2])
-        dpct=(curr/prev-1)*100 if prev else 0
-        atr_v=float(df["ATR"].iloc[-1]) if "ATR" in df.columns else curr*0.01
-        rk=risk_calc(curr,atr_v,capital,risk_p,sig,rr_r) if sig!="NEUTRAL" else None
-
-        # Banner principale
-        htf_str=f"HTF {htf_sc}/100 ({htf_nm})"
-        if sig=="LONG": st.success(f"🟢 **LONG — {sc}/100**  ·  {ic} {src}  ·  {tf}  ·  {htf_str}")
-        elif sig=="SHORT": st.error(f"🔴 **SHORT — {sc}/100**  ·  {ic} {src}  ·  {tf}  ·  {htf_str}")
-        else: st.warning(f"⚪ **NEUTRAL — {sc}/100**  ·  {ic} {src}  ·  {tf}  ·  {htf_str}")
-
-        # Metriche
-        px_fmt=f"${curr:,.6f}" if curr<0.01 else f"${curr:,.4f}" if curr<1 else f"${curr:,.2f}"
-        c1,c2,c3,c4,c5,c6=st.columns(6)
-        c1.metric("💰 Prezzo",px_fmt,f"{dpct:+.2f}%")
-        c2.metric("📉 RSI",f"{df['RSI'].iloc[-1]:.1f}" if "RSI" in df.columns else "—")
-        c3.metric("💪 ADX",f"{df['ADX'].iloc[-1]:.1f}" if "ADX" in df.columns else "—")
-        std_v=df["ST_d"].iloc[-1] if "ST_d" in df.columns else 0
+        px_fmt = f"${curr:,.6f}" if curr<0.01 else f"${curr:,.4f}" if curr<1 else f"${curr:,.2f}"
+        c1,c2,c3,c4,c5,c6 = st.columns(6)
+        c1.metric("💰 Prezzo",   px_fmt, f"{dpct:+.2f}%")
+        c2.metric("📉 RSI",      f"{df['RSI'].iloc[-1]:.1f}" if "RSI" in df.columns else "—")
+        c3.metric("💪 ADX",      f"{df['ADX'].iloc[-1]:.1f}" if "ADX" in df.columns else "—")
+        std_v = df["ST_d"].iloc[-1] if "ST_d" in df.columns else 0
         c4.metric("🌊 SuperTrend","🟢 BULL" if std_v==1 else "🔴 BEAR")
-        c5.metric("📡 HTF",f"{htf_sc}/100",htf_nm)
-        c6.metric("📐 ATR",f"{atr_v:.5g}")
+        c5.metric("📡 HTF",      f"{htf_sc}/100", htf_nm)
+        c6.metric("📐 ATR",      f"{atr_v:.5g}")
 
-        # Risk Manager box
-        if rk and sig!="NEUTRAL":
+        if rk and sig != "NEUTRAL":
             st.markdown("---")
             st.subheader(f"💰 Piano trade — {'🟢 LONG' if sig=='LONG' else '🔴 SHORT'}")
-            r1,r2,r3,r4,r5=st.columns(5)
-            r1.metric("🎯 Entry",f"${curr:,.5g}")
-            r2.metric("🛑 Stop Loss",f"${rk['sl']:,.5g}",f"-{rk['sl_pct']:.2f}%")
-            r3.metric(f"✅ TP1 (1:{rr_r:.1f})",f"${rk['tp1']:,.5g}")
-            r4.metric("🚀 TP2 (ext.)",f"${rk['tp2']:,.5g}")
-            r5.metric("⚠️ Rischio $",f"${rk['risk_usd']:.2f}",f"{risk_p}%")
-            sz=f"{rk['size']:.6f}" if curr<1 else f"{rk['size']:.4f}"
-            valore=rk["size"]*curr
-            st.info(f"📦 **Size:** `{sz}` unità · **Valore:** `${valore:,.2f}` · **R:R 1:{rr_r:.1f}** · ⚠️ Verifica sempre con il tuo exchange")
+            r1,r2,r3,r4,r5 = st.columns(5)
+            r1.metric("🎯 Entry",          f"${curr:,.5g}")
+            r2.metric("🛑 Stop Loss",      f"${rk['sl']:,.5g}",  f"-{rk['sl_pct']:.2f}%")
+            r3.metric(f"✅ TP1 (1:{rr_r:.1f})", f"${rk['tp1']:,.5g}")
+            r4.metric("🚀 TP2 (ext.)",     f"${rk['tp2']:,.5g}")
+            r5.metric("⚠️ Rischio $",      f"${rk['risk_usd']:.2f}", f"{risk_p}%")
+            sz     = f"{rk['size']:.6f}" if curr<1 else f"{rk['size']:.4f}"
+            valore = rk["size"] * curr
+            st.info(f"📦 **Size:** `{sz}` unità · **Valore:** `${valore:,.2f}` · **R:R 1:{rr_r:.1f}`")
             st.markdown("---")
 
         with st.expander("🧠 AI Score — confluenza dettagliata"):
-            ca,cb=st.columns(2)
+            ca, cb = st.columns(2)
             ca.write(f"**LTF score:** {sc}/100")
             ca.write(f"**HTF score ({htf_nm}):** {htf_sc}/100")
             ca.write(f"**k-NN:** {'🟢 LONG' if res['knn']==1 else '🔴 SHORT' if res['knn']==-1 else '⚪'}")
             for r_ in res["reasons"]: cb.write(f"• {r_}")
 
-        sigs=detect_signals(df,eps) if show_sig else []
-        fig=make_chart(df,eps,ovl,osc,sigs,rk,sig,src,h_chart)
-        st.plotly_chart(fig,use_container_width=True)
+        sigs = detect_signals(df, eps) if show_sig else []
+        fig  = make_chart(df, eps, ovl, osc, sigs, rk, sig, src, h_chart)
+        st.plotly_chart(fig, use_container_width=True)
         st.caption("🖱️ Clicca legenda per attivare/disattivare · Scroll = zoom · Drag = pan")
 
         with st.expander("📋 Tabella dati"):
-            cols_=["open","high","low","close","volume","RSI","MACD","ADX","SK","ATR","CCI"]
+            cols_ = ["open","high","low","close","volume","RSI","MACD","ADX","SK","ATR","CCI"]
             st.dataframe(df.tail(30)[[c for c in cols_ if c in df.columns]].round(6),
                 use_container_width=True)
 
-    with col_cal:
-        st.subheader("📅 Calendario")
-        with st.spinner("..."): ev_all=get_calendar()
-        sd=st.date_input("Da",datetime.now().date())
-        ed=st.date_input("A",datetime.now().date()+timedelta(days=14))
-        imp_f=st.multiselect("Impatto",["HIGH","MEDIUM","LOW"],default=["HIGH","MEDIUM"])
-        evs=sorted([e for e in ev_all if imp_f and e.get("date")
-                    and sd<=datetime.strptime(e["date"],"%Y-%m-%d").date()<=ed
-                    and e["impact"] in imp_f],key=lambda x:x["date"]+x.get("time",""))
+    # ── Colonna destra ────────────────────────────────────────────────────
+    with col_right:
+
+        # 1. TRADE ZONE ANALYZER — asset selezionato (IN PRIMO PIANO)
+        st.subheader("🎯 Trade Zone Analyzer")
+        st.caption(f"{coin['symbol']} · {tf} · analisi live")
+        with st.spinner("Analisi in corso..."):
+            tz = analyze_trade_zone(df, coin, tf)
+        render_trade_zone(tz)
+
+        st.divider()
+
+        # 2. SCANNER TOP 100 — sotto la trade zone
+        render_scanner_full(st.container(), tf)
+
+        st.divider()
+
+        # 3. CALENDARIO ECONOMICO — in fondo
+        st.subheader("📅 Calendario Economico")
+        with st.spinner("..."): ev_all = get_calendar()
+        sd  = st.date_input("Da", datetime.now().date())
+        ed  = st.date_input("A",  datetime.now().date() + timedelta(days=14))
+        imp_f = st.multiselect("Impatto", ["HIGH","MEDIUM","LOW"], default=["HIGH","MEDIUM"])
+        evs = sorted([e for e in ev_all
+                      if imp_f and e.get("date")
+                      and sd <= datetime.strptime(e["date"],"%Y-%m-%d").date() <= ed
+                      and e["impact"] in imp_f],
+                     key=lambda x: x["date"] + x.get("time",""))
         for e in evs:
-            ic={"HIGH":"🔴","MEDIUM":"🟡","LOW":"🟢"}.get(e["impact"],"⚪")
-            act=f" → **{e['actual']}**" if e.get("actual") else ""
-            st.markdown(f"{ic} **{e['event']}**{act}")
+            ic2 = {"HIGH":"🔴","MEDIUM":"🟡","LOW":"🟢"}.get(e["impact"],"⚪")
+            act = f" → **{e['actual']}**" if e.get("actual") else ""
+            st.markdown(f"{ic2} **{e['event']}**{act}")
             st.caption(f"{e['country']} · {e['date']} {e.get('time','')}")
             st.caption(f"Prec:`{e['prev']}` · Prev:`{e['forecast']}`")
             st.divider()
         if not evs: st.info("Nessun evento")
-
-    # ── Scanner inserito sotto il calendario ──
-    render_scanner(col_cal, tf)
 
 main()
